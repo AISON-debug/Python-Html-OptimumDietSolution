@@ -656,6 +656,12 @@
       [elpProt, elpSat, elpUns, elpSim, elFibRatio].forEach(setGradient);
     }
 
+    // Обновление глобальных целевых значений (заглушка для совместимости)
+    function updateTargetsFromSummary(){
+      // Функция оставлена для обратной совместимости с исходным кодом.
+      // Цели обновляются непосредственно в updateAll().
+    }
+
     function updateAll(){
       syncUIBits();
       const sex = elSex.value;
@@ -693,6 +699,15 @@
       // Итоговая энергия
       const kcalFinal = (gProt*4) + (gSat*9) + (gUns*9) + (gSim*4) + (gComplex*4) + ((gFibSol + gFibIns) * 1.5);
       const kcalFinal10 = Math.round(kcalFinal*10)/10;
+      // Обновляем глобальные цели для оптимизатора
+      targets.protein = gProt;
+      targets.saturatedFat = gSat;
+      targets.unsaturatedFat = gUns;
+      targets.simpleCarbs = gSim;
+      targets.complexCarbs = gComplex;
+      targets.solubleFiber = gFibSol;
+      targets.insolubleFiber = gFibIns;
+      targets.calories = kcalFinal10;
       // Таблица
       const rows = [
         ['Белки', gProt + ' г'],
