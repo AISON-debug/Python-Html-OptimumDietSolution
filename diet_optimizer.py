@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 import math
 import random
-import plotly.graph_objects as go
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +429,12 @@ class DietOptimizer:
         fraction per run, and ``{prefix}_rmse_best_surface.html`` visualising the
         cumulative best RMSE.  File paths are returned for convenience.
         """
+        try:
+            import plotly.graph_objects as go  # type: ignore
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "Plotly is required for plotting. Install it with 'pip install plotly'."
+            ) from exc
 
         heat_data = result.get("heatData", [])
         if not heat_data:
@@ -648,7 +653,11 @@ if __name__ == "__main__":
     fixed = {0: 20.0}
     result = optimizer.compute_optimal_diet(fixed_indices=fixed)
     print(optimizer.format_result_tables(result, fixed_indices=fixed))
-    paths = optimizer.plot_result_graphs(result, prefix="demo")
+    try:
+        paths = optimizer.plot_result_graphs(result, prefix="demo")
+    except RuntimeError as exc:
+        print(exc)
+        paths = []
     if paths:
         print("Generated plots:")
         for p in paths:
