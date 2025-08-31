@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 import math
+import random
 
 
 # ---------------------------------------------------------------------------
@@ -183,59 +184,92 @@ class DietOptimizer:
         rmse = compute_rmse(self.targets, totals_final, self.weights)
         return var_add_map, totals_final, rmse
 
+    def _evaluate_diet(
+        self,
+        var_idxs: Sequence[int],
+        resid: List[float],
+        totals_fixed: List[float],
+        fixed_indices: Dict[int, float],
+        rf: float,
+    ) -> Dict[str, object]:
+        """Mimic the webapp's evaluateDiet helper."""
+
+        var_map, totals_final, rmse = self._optimize_with_alpha(
+            var_idxs, resid, totals_fixed, rf
+        )
+        all_var_idxs = [
+            i for i in range(len(self.nutrient_matrix)) if i not in fixed_indices
+        ]
+        full_map, totals_full, rmse_full = self._optimize_with_alpha(
+            all_var_idxs, resid, totals_fixed, rf
+        )
+        return {
+            "varAdd": var_map,
+            "totalsFinal": totals_final,
+            "rmse": rmse,
+            "fullMap": full_map,
+            "totalsFull": totals_full,
+            "rmseFull": rmse_full,
+        }
+
     def compute_optimal_diet(
         self,
         fixed_indices: Dict[int, float] | None = None,
-        alphas: Sequence[float] | None = None,
+        selected_indices: Sequence[int] | None = None,
+        min_tail_percent: int = 1,
+        run_count: int = 1,
     ) -> Dict[str, object]:
-        """Search for the best diet configuration over ``alphas``."""
+        """Search over residual fractions and runs to find best diet configuration."""
 
         if fixed_indices is None:
             fixed_indices = {}
-        if alphas is None:
-            alphas = [i / 10 for i in range(1, 11)]  # 0.1 .. 1.0
 
         totals_fixed = [0.0 for _ in self.weights]
         for idx, grams in fixed_indices.items():
             for k in range(len(totals_fixed)):
                 totals_fixed[k] += self.nutrient_matrix[idx][k] * grams
+
         resid = [
             self.targets[k] - totals_fixed[k] for k in range(len(totals_fixed))
         ]
-        var_idxs = [
-            i for i in range(len(self.nutrient_matrix)) if i not in fixed_indices
-        ]
 
-        best_map: Dict[int, float] | None = None
-        best_totals: List[float] | None = None
-        best_rmse = float("inf")
-        best_alpha = None
+        if selected_indices is None:
+            var_idxs = [
+                i for i in range(len(self.nutrient_matrix)) if i not in fixed_indices
+            ]
+        else:
+            var_idxs = [i for i in selected_indices if i not in fixed_indices]
 
-        for alpha in alphas:
-            var_map, totals, rmse = self._optimize_with_alpha(
-                var_idxs, resid[:], totals_fixed, alpha
-            )
-            if rmse < best_rmse:
-                best_rmse = rmse
-                best_map = var_map
-                best_totals = totals
-                best_alpha = alpha
+        run_best = [None for _ in range(run_count)]
+        best_sel = None
+        best_full = None
 
-        if best_map is None or best_totals is None:
-            best_map = {}
-            best_totals = totals_fixed[:]
-            best_alpha = 1.0
-            best_rmse = compute_rmse(self.targets, best_totals, self.weights)
+        for perc in range(min_tail_percent, 101):
+            rf = perc / 100.0
+            for run in range(run_count):
+                shuffled = var_idxs[:]
+                random.shuffle(shuffled)
+                res = self._evaluate_diet(
+                    shuffled, resid, totals_fixed, fixed_indices, rf
+                )
+                if run_best[run] is None or res["rmse"] < run_best[run]["rmse"]:
+                    run_best[run] = {"run": run + 1, "rf": perc, "rmse": res["rmse"]}
+                if best_sel is None or res["rmse"] < best_sel["rmse"]:
+                    best_sel = dict(res)
+                    best_sel.update({"rf": perc, "run": run + 1})
+                if best_full is None or res["rmseFull"] < best_full["rmseFull"]:
+                    best_full = dict(res)
+                    best_full.update({"rf": perc, "run": run + 1})
+
+        overall_best = None
+        if run_best:
+            overall_best = min(run_best, key=lambda x: x["rmse"] if x else float("inf"))
 
         return {
-            "bestSelection": {
-                "varAdd": best_map,
-                "totals": best_totals,
-                "rmse": best_rmse,
-                "alpha": best_alpha,
-            },
-            "overallBestRmse": best_rmse,
-            "alphaStar": best_alpha,
+            "bestSelection": best_sel,
+            "bestFull": best_full,
+            "runBest": run_best,
+            "overallBest": overall_best,
         }
 
 
@@ -266,6 +300,7 @@ if __name__ == "__main__":
     # Assume 20g of food 0 is fixed
     fixed = {0: 20.0}
     result = optimizer.compute_optimal_diet(fixed_indices=fixed)
-    print("Best RMSE:", result["overallBestRmse"])
-    print("Best alpha:", result["alphaStar"])
-    print("Selected additions:", result["bestSelection"]["varAdd"])
+    best = result["bestSelection"]
+    print("Best RMSE:", best["rmse"] if best else None)
+    print("Residual fraction (%):", best["rf"] if best else None)
+    print("Selected additions:", best["varAdd"] if best else {})
