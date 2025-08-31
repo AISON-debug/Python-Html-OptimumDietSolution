@@ -78,6 +78,8 @@ class DietOptimizer:
     max_portions: List[float]
     weights: List[float]
     targets: List[float]
+    product_names: List[str] | None = None
+    nutrient_names: List[str] | None = None
     calorie_index: int | None = None
     max_iterations: int = 10
 
@@ -326,6 +328,90 @@ class DietOptimizer:
             "overallBest": overall_best,
         }
 
+    # ------------------------------------------------------------------
+    # Reporting helpers
+    # ------------------------------------------------------------------
+
+    def format_result_tables(
+        self,
+        result: Dict[str, object],
+        fixed_indices: Dict[int, float] | None = None,
+    ) -> str:
+        """Return text tables for products and nutrient comparison.
+
+        Mirrors the WebApp's rendering of the *"Оптимизированный рацион"* and
+        *"Сравнение целевых показателей и результатов оптимизации"*
+        tables【F:nutrition_webapp 31.08.2025.html†L996-L1044】.
+        """
+
+        if fixed_indices is None:
+            fixed_indices = {}
+        products = self.product_names or [f"Product {i}" for i in range(len(self.nutrient_matrix))]
+        nutrients = self.nutrient_names or [f"Nutrient {i}" for i in range(len(self.targets))]
+
+        best_sel = result["bestSelection"]
+        best_full = result["bestFull"]
+        var_add = best_sel.get("varAdd", {})
+        full_map = best_full.get("fullMap", {})
+
+        full_items = []
+        selected_items = []
+        for idx, name in enumerate(products):
+            sel_g = fixed_indices.get(idx, var_add.get(idx, 0.0))
+            full_g = fixed_indices.get(idx, full_map.get(idx, 0.0))
+            if full_g > 0:
+                full_items.append((name, full_g))
+            if sel_g > 0:
+                selected_items.append((name, sel_g))
+
+        full_items.sort(key=lambda x: x[1], reverse=True)
+        selected_items.sort(key=lambda x: x[1], reverse=True)
+        max_len = max(len(full_items), len(selected_items))
+
+        lines: List[str] = []
+        lines.append("Оптимизированный рацион")
+        header = (
+            f"{'Продукт (Полная база)':<25} {'Вес (г)':>10}    "
+            f"{'Продукт (Выбранные)':<25} {'Вес (г)':>10}"
+        )
+        lines.append(header)
+        lines.append("-" * len(header))
+        for i in range(max_len):
+            f_name, f_g = full_items[i] if i < len(full_items) else ("", 0.0)
+            s_name, s_g = selected_items[i] if i < len(selected_items) else ("", 0.0)
+            f_val = f"{f_g:10.2f}" if f_name else " " * 10
+            s_val = f"{s_g:10.2f}" if s_name else " " * 10
+            lines.append(
+                f"{f_name:<25} {f_val}    {s_name:<25} {s_val}"
+            )
+
+        lines.append("")
+        lines.append("Сравнение целевых показателей и результатов оптимизации")
+        header2 = (
+            f"{'Показатель':<30} {'Цель':>10} {'Полная база':>15} {'Выбранные':>15}"
+        )
+        lines.append(header2)
+        lines.append("-" * len(header2))
+        for k, name in enumerate(nutrients):
+            unit = "" if self.calorie_index is not None and k == self.calorie_index else " г"
+            tgt = f"{self.targets[k]:.1f}" if unit == "" else f"{self.targets[k]:.0f}"
+            full_val = best_full["totalsFull"][k]
+            full_str = f"{full_val:.1f}" if unit == "" else f"{full_val:.0f}"
+            sel_val = best_sel["totalsFinal"][k]
+            sel_str = f"{sel_val:.1f}" if unit == "" else f"{sel_val:.0f}"
+            lines.append(
+                f"{name:<30} {tgt + unit:>10} {full_str + unit:>15} {sel_str + unit:>15}"
+            )
+
+        lines.append(
+            f"{'Доля остатка':<30} {'—':>10} {str(best_full['rf']) + '%':>15} {str(best_sel['rf']) + '%':>15}"
+        )
+        lines.append(
+            f"{'RMSE':<30} {'—':>10} {best_full['rmseFull']:15.3f} {best_sel['rmse']:15.3f}"
+        )
+
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Demo usage
@@ -342,6 +428,8 @@ if __name__ == "__main__":
     max_portions = [10, 10, 10]
     weights = [1.0, 1.0]
     targets = [50, 50]
+    product_names = ["Food A", "Food B", "Food C"]
+    nutrient_names = ["Nutrient 1", "Nutrient 2"]
 
     optimizer = DietOptimizer(
         nutrient_matrix=nutrient_matrix,
@@ -349,11 +437,11 @@ if __name__ == "__main__":
         max_portions=max_portions,
         weights=weights,
         targets=targets,
+        product_names=product_names,
+        nutrient_names=nutrient_names,
     )
 
     # Assume 20g of food 0 is fixed
     fixed = {0: 20.0}
     result = optimizer.compute_optimal_diet(fixed_indices=fixed)
-    print("Best RMSE:", result["overallBestRmse"])
-    print("Best alpha:", result["alphaStar"])
-    print("Selected additions:", result["bestSelection"]["varAdd"])
+    print(optimizer.format_result_tables(result, fixed_indices=fixed))
