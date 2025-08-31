@@ -777,6 +777,7 @@
        elpProt, elpSat, elpUns, elpSim,
        elFibTotal, elFibRatio].forEach(el => {
         el.addEventListener('input', updateAll);
+        el.addEventListener('change', updateAll);
       });
       // Кнопка отправки
       elSend.addEventListener('click', send);
