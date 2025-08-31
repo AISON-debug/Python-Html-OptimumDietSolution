@@ -520,7 +520,8 @@
       dietInput.addEventListener('blur', adjustToStep);
       // Событие change — значение изменилось (в том числе через стрелочки)
       dietInput.addEventListener('change', adjustToStep);
-      // На событие input пересчёт не выполняем, чтобы не мешать вводу
+      // Событие input — пересчёт в реальном времени при вводе веса
+      dietInput.addEventListener('input', adjustToStep);
     }
   });
 
