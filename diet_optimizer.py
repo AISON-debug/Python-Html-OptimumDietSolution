@@ -1,11 +1,12 @@
-"""Simple diet optimization module implementing iterative NNLS-like algorithm.
+"""Lightweight diet optimisation module.
 
-This module is based on pseudocode provided for a web application that optimizes
-food portions to meet nutrient targets.  It does not rely on external numeric
-libraries and operates on Python lists.  The implementation follows an iterative
-non-negative least squares approach with a residual scaling factor ``alpha``.
-The main entry point is :class:`DietOptimizer` whose ``compute_optimal_diet``
-method searches for the ``alpha`` producing the lowest RMSE.
+This module provides a small, dependency‑free solver for choosing food portions
+to meet nutrient targets.  It mirrors the optimisation core used in the HTML
+web application: an iterative non‑negative least squares routine that attempts
+to cover a fraction of the remaining nutrient residual on each iteration.  The
+public :class:`DietOptimizer` exposes :meth:`compute_optimal_diet` which searches
+over residual fractions and random orderings of products to minimise the
+weighted RMSE between achieved and target nutrients.
 
 The code includes a small demo executed when run as a script.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 import math
+import random
 
 
 # ---------------------------------------------------------------------------
@@ -79,26 +81,32 @@ class DietOptimizer:
     calorie_index: int | None = None
     max_iterations: int = 10
 
-    def _optimize_with_alpha(
-        self,
-        var_idxs: Sequence[int],
-        resid: List[float],
-        totals_fixed: List[float],
-        alpha: float,
-    ) -> Tuple[Dict[int, float], List[float], float]:
-        """Perform iterative optimization for a single ``alpha`` value."""
+    # ------------------------------------------------------------------
+    # Internal optimisation routines
+    # ------------------------------------------------------------------
+
+    def _run_iterative_optimization(
+        self, var_idxs: Sequence[int], resid: List[float], alpha: float
+    ) -> Dict[int, float]:
+        """Allocate weights to ``var_idxs`` attempting to cover ``alpha`` of
+        the residual in each iteration.
+
+        This mirrors the JavaScript ``runIterativeOptimization`` routine in the
+        WebApp【F:nutrition_webapp 31.08.2025.html†L569-L705】.
+        """
 
         resid_vec = resid[:]
         step_vals = {i: self.steps[i] for i in var_idxs}
         max_vals = {i: self.steps[i] * self.max_portions[i] for i in var_idxs}
         var_add_map = {i: 0.0 for i in var_idxs}
-        iteration = 0
 
+        iteration = 0
         while iteration < self.max_iterations:
             active = [
                 idx
                 for idx in var_idxs
-                if max_vals[idx] - var_add_map[idx] >= step_vals[idx] / 2
+                if step_vals[idx] > 0
+                and max_vals[idx] - var_add_map[idx] >= step_vals[idx] / 2
             ]
             if not active:
                 break
@@ -162,6 +170,10 @@ class DietOptimizer:
                 grams = min(grams, allowed)
                 if step:
                     grams = round(grams / step) * step
+                    if grams > allowed:
+                        grams = math.floor(allowed / step) * step
+                    if grams < 0:
+                        grams = 0
                 if grams <= 0:
                     continue
                 updated = True
@@ -173,32 +185,93 @@ class DietOptimizer:
                 break
             iteration += 1
 
+        return var_add_map
+
+    def _evaluate_diet(
+        self,
+        var_idxs: Sequence[int],
+        resid: List[float],
+        totals_fixed: List[float],
+        fixed_indices: Dict[int, float],
+        alpha: float,
+    ) -> Dict[str, object]:
+        """Evaluate a diet configuration for a given ``alpha``.
+
+        Returns additions for selected variables and for the full product set
+        alongside nutrient totals and RMSE values.  Mirrors the WebApp's
+        ``evaluateDiet`` function【F:nutrition_webapp 31.08.2025.html†L772-L841】.
+        """
+
+        var_add = {i: 0.0 for i in range(len(self.nutrient_matrix))}
+        if var_idxs:
+            var_map = self._run_iterative_optimization(var_idxs, resid[:], alpha)
+            var_add.update(var_map)
+
         totals_var = [0.0 for _ in self.targets]
-        for idx, grams in var_add_map.items():
+        for idx in var_idxs:
+            grams = var_add.get(idx, 0.0)
             for k in range(len(totals_var)):
                 totals_var[k] += self.nutrient_matrix[idx][k] * grams
+
         totals_final = [
             totals_fixed[k] + totals_var[k] for k in range(len(totals_var))
         ]
         rmse = compute_rmse(self.targets, totals_final, self.weights)
-        return var_add_map, totals_final, rmse
+
+        all_var_idxs = [
+            i for i in range(len(self.nutrient_matrix)) if i not in fixed_indices
+        ]
+        full_map: Dict[int, float] = {}
+        totals_full = totals_fixed[:]
+        rmse_full = rmse
+        if all_var_idxs:
+            full_map = self._run_iterative_optimization(all_var_idxs, resid[:], alpha)
+            totals_var_full = [0.0 for _ in self.targets]
+            for idx, grams in full_map.items():
+                for k in range(len(totals_var_full)):
+                    totals_var_full[k] += self.nutrient_matrix[idx][k] * grams
+            totals_full = [
+                totals_fixed[k] + totals_var_full[k]
+                for k in range(len(totals_var_full))
+            ]
+            rmse_full = compute_rmse(self.targets, totals_full, self.weights)
+
+        return {
+            "varAdd": {k: v for k, v in var_add.items() if v > 0},
+            "totalsFinal": totals_final,
+            "rmse": rmse,
+            "totalsFull": totals_full,
+            "rmseFull": rmse_full,
+            "fullMap": {k: v for k, v in full_map.items() if v > 0},
+        }
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def compute_optimal_diet(
         self,
         fixed_indices: Dict[int, float] | None = None,
-        alphas: Sequence[float] | None = None,
+        min_tail_percent: int = 10,
+        run_count: int = 1,
     ) -> Dict[str, object]:
-        """Search for the best diet configuration over ``alphas``."""
+        """Search for the best diet configuration over residual fractions.
+
+        ``min_tail_percent`` sets the lower bound (1–100) of the residual
+        fraction search space, and ``run_count`` controls how many random
+        permutations of the variable products are evaluated for each
+        fraction.  The procedure mirrors the web application's
+        ``computeOptimalDiet`` routine【F:nutrition_webapp 31.08.2025.html†L879-L976】.
+        """
 
         if fixed_indices is None:
             fixed_indices = {}
-        if alphas is None:
-            alphas = [i / 10 for i in range(1, 11)]  # 0.1 .. 1.0
 
         totals_fixed = [0.0 for _ in self.weights]
         for idx, grams in fixed_indices.items():
             for k in range(len(totals_fixed)):
                 totals_fixed[k] += self.nutrient_matrix[idx][k] * grams
+
         resid = [
             self.targets[k] - totals_fixed[k] for k in range(len(totals_fixed))
         ]
@@ -206,36 +279,51 @@ class DietOptimizer:
             i for i in range(len(self.nutrient_matrix)) if i not in fixed_indices
         ]
 
-        best_map: Dict[int, float] | None = None
-        best_totals: List[float] | None = None
-        best_rmse = float("inf")
-        best_alpha = None
+        best_sel: Dict[str, object] | None = None
+        best_full: Dict[str, object] | None = None
+        run_best: List[Dict[str, float] | None] = [None] * run_count
 
-        for alpha in alphas:
-            var_map, totals, rmse = self._optimize_with_alpha(
-                var_idxs, resid[:], totals_fixed, alpha
-            )
-            if rmse < best_rmse:
-                best_rmse = rmse
-                best_map = var_map
-                best_totals = totals
-                best_alpha = alpha
+        for perc in range(max(1, min_tail_percent), 101):
+            alpha = perc / 100.0
+            for run in range(run_count):
+                shuffled = var_idxs[:]
+                random.shuffle(shuffled)
+                res = self._evaluate_diet(
+                    shuffled, resid[:], totals_fixed, fixed_indices, alpha
+                )
+                if run_best[run] is None or res["rmse"] < run_best[run]["rmse"]:
+                    run_best[run] = {"run": run + 1, "rf": perc, "rmse": res["rmse"]}
+                if best_sel is None or res["rmse"] < best_sel["rmse"]:
+                    best_sel = res | {"rf": perc, "run": run + 1}
+                if best_full is None or res["rmseFull"] < best_full["rmseFull"]:
+                    best_full = res | {"rf": perc, "run": run + 1}
 
-        if best_map is None or best_totals is None:
-            best_map = {}
-            best_totals = totals_fixed[:]
-            best_alpha = 1.0
-            best_rmse = compute_rmse(self.targets, best_totals, self.weights)
+        if best_sel is None:
+            best_sel = {
+                "varAdd": {},
+                "totalsFinal": totals_fixed[:],
+                "rmse": compute_rmse(self.targets, totals_fixed, self.weights),
+                "rf": 1.0,
+                "run": 1,
+            }
+        if best_full is None:
+            best_full = best_sel.copy()
+
+        overall_best = min(run_best, key=lambda x: x["rmse"]) if run_best else None
+        avg_rf = (
+            sum(r["rf"] for r in run_best if r is not None) / run_count
+            if run_best
+            else 0
+        )
 
         return {
-            "bestSelection": {
-                "varAdd": best_map,
-                "totals": best_totals,
-                "rmse": best_rmse,
-                "alpha": best_alpha,
-            },
-            "overallBestRmse": best_rmse,
-            "alphaStar": best_alpha,
+            "bestSelection": best_sel,
+            "bestFull": best_full,
+            "runBest": run_best,
+            "overallBestRmse": best_sel["rmse"],
+            "alphaStar": best_sel["rf"] / 100.0,
+            "avgRf": avg_rf,
+            "overallBest": overall_best,
         }
 
 
