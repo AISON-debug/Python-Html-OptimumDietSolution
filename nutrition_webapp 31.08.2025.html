@@ -1,0 +1,1985 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Telegram Nutrition WebApp</title>
+  <!--
+    This WebApp allows users to pick a pool of products from a built‑in
+    database (products_db.csv embedded below), set gram amounts for
+    those products and optionally fix the amounts.  The remaining
+    nutrients ("tail") are filled in real time by suggesting additional
+    products from the database.  Suggestions respect each product's
+    step size (portion size) and attempt to minimize the weighted
+    squared error between the target and achieved nutrient totals.
+    A radar chart visualises the coverage of the nutrient goals for
+    both the chosen pool and the pool plus suggestions.
+  -->
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-bottom: 1em;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px;
+      text-align: center;
+    }
+    th {
+      background: #f0f0f0;
+    }
+    input[type="number"] {
+      width: 70px;
+    }
+
+    /* Additional styles copied from the Telegram nutrition calculator so the embedded
+       calculator looks consistent.  Variables and classes are defined here
+       to scope the theme for the calculator. */
+    :root {
+      --bg: #ffffff;
+      --text: #222222;
+      --subtle: #6b7280;
+      --btn: #0ea5e9;
+      --btn-text: #ffffff;
+      --card: #f3f4f6;
+      --border: #e5e7eb;
+    }
+    .tg-theme {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .card {
+      width: min(680px, 96vw);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 6px 28px rgba(0,0,0,.08);
+      padding: 18px 16px 18px;
+    }
+    .muted { margin: 0 0 10px 0; color: var(--subtle); font-size: 13px; }
+    .grid { display: grid; gap: 12px; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .field {
+      display: grid; gap: 6px;
+      background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+    }
+    .field label { font-size: 13px; color: var(--subtle); }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .slider {
+      -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+      background: linear-gradient(90deg, var(--btn), var(--btn));
+      background-size: 50% 100%; background-repeat: no-repeat; background-color: #e5e7eb; border-radius: 999px;
+      outline: none;
+    }
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--btn);
+      border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    }
+    .slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--btn); border: 2px solid #fff; }
+    .value {
+      min-width: 86px; text-align: right; font-weight: 700; font-size: 18px;
+      padding: 6px 10px; background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    }
+    .osso-box {
+      display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+      background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+    }
+    .osso-title { font-size: 14px; color: var(--subtle); margin: 0; }
+    .osso-value { font-weight: 800; font-size: 22px; }
+    /* style for summary table inside calculator */
+    #calculatorContainer table {
+      width: 100%; border-collapse: collapse; margin-top: 8px; background: #fff; border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    }
+    #calculatorContainer th, #calculatorContainer td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #calculatorContainer th { text-align: left; color: var(--subtle); font-weight: 600; }
+    #calculatorContainer tr:last-child td { border-bottom: none; }
+    #calculatorContainer .buttons { display: flex; gap: 8px; margin-top: 14px; }
+    #calculatorContainer button.subtle {
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+      padding: 10px 12px; border-radius: 10px; font-size: 14px;
+    }
+    /* Подсветка строки выбранного продукта — нежно‑зелёный фон */
+    .selected-row {
+      background: #e0ffe0;
+    }
+    /* Подсветка ячейки веса фиксированного продукта — светло‑красный фон */
+    .fixed-weight {
+      background: #ffb3b3;
+    }
+    .suggestion-item {
+      color: #008000; /* green */
+    }
+    #suggestionsContainer {
+      margin-top: 20px;
+    }
+    #productTable.collapsed .nutrient-col {
+      display: none;
+    }
+    /* Стили для радарной диаграммы удалены */
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.35.2"></script>
+</head>
+<body>
+  <!-- Калькулятор питательных показателей (вставка из telegram_web_app_slider_20_30.html) -->
+  <div id="calculatorContainer" class="tg-theme">
+    <div class="card">
+      <h1>Питательный калькулятор</h1>
+      <p class="muted">Одна страница. ОСО пересчитывается в реальном времени. Итоги — снизу.</p>
+
+      <!-- Блок ОСО -->
+      <section class="grid cols-2" style="margin-top: 6px;">
+        <div class="field">
+          <label for="sex">Пол</label>
+          <select id="sex">
+            <option value="Мужской">Мужской</option>
+            <option value="Женский">Женский</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="activity">Уровень активности</label>
+          <select id="activity"></select>
+        </div>
+
+        <div class="field">
+          <label for="weight">Вес (кг)</label>
+          <input id="weight" type="number" inputmode="decimal" min="20" max="300" step="0.1" value="67">
+        </div>
+        <div class="field">
+          <label for="height">Рост (см)</label>
+          <input id="height" type="number" inputmode="decimal" min="100" max="250" step="0.5" value="185">
+        </div>
+        <div class="field">
+          <label for="age">Возраст</label>
+          <input id="age" type="number" inputmode="numeric" min="10" max="100" step="1" value="26">
+        </div>
+        <div class="osso-box">
+          <div>
+            <p class="osso-title">Основной суточный обмен (ОСО)</p>
+            <div id="ossoExplain" class="muted" style="font-size:12px;"></div>
+          </div>
+          <div id="osso" class="osso-value">0.0 ккал</div>
+        </div>
+      </section>
+
+      <!-- Ползунки нутриентов -->
+      <section class="grid" style="margin-top: 14px;">
+        <div class="row">
+          <div class="field">
+            <label>Белки (% от калоража: 20–35)</label>
+            <input id="pProtein" class="slider" type="range" min="20" max="35" step="1" value="25">
+          </div>
+          <div id="vProtein" class="value">25%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Жиры насыщённые (%: 5–10)</label>
+            <input id="pFatSat" class="slider" type="range" min="5" max="10" step="1" value="8">
+          </div>
+          <div id="vFatSat" class="value">8%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Жиры ненасыщённые (%: 12–25)</label>
+            <input id="pFatUnsat" class="slider" type="range" min="12" max="25" step="1" value="18">
+          </div>
+          <div id="vFatUnsat" class="value">18%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Углеводы простые (%: 5–10)</label>
+            <input id="pCarbSimple" class="slider" type="range" min="5" max="10" step="1" value="7">
+          </div>
+          <div id="vCarbSimple" class="value">7%</div>
+        </div>
+      </section>
+
+      <!-- Клетчатка -->
+      <section class="grid cols-2" style="margin-top: 14px;">
+        <div class="field">
+          <label for="fiberTotal">Общая клетчатка (г)</label>
+          <input id="fiberTotal" type="number" inputmode="numeric" min="0" max="200" step="1" value="25">
+        </div>
+        <div class="field">
+          <label for="fiberRatio">Соотношение клетчатки (Растворимая : Нерастворимая)</label>
+          <div class="row">
+            <input id="fiberRatio" class="slider" type="range" min="2.0" max="3.0" step="0.1" value="2.5">
+            <div id="vFiberRatio" class="value">1 : 2.5</div>
+          </div>
+          <div class="muted">Растворимая — всегда 1; Нерастворимая — ползунок.</div>
+        </div>
+      </section>
+
+      <!-- Итоговая таблица -->
+      <section style="margin-top: 12px;">
+        <table>
+          <thead>
+            <tr><th>Показатель</th><th class="right">Значение</th></tr>
+          </thead>
+          <tbody id="summary">
+            <!-- динамически будет заполнено -->
+          </tbody>
+        </table>
+
+<!-- Контейнер для результатов оптимизации -->
+<div id="optimalDietContainer" style="margin-top: 20px;"></div>
+<!-- Контейнер для радарной диаграммы удалён по требованию пользователя -->
+        <div class="buttons">
+          <button id="send" class="subtle">Отправить в бота</button>
+        </div>
+      </section>
+    </div>
+  </div>
+<!-- Раздел базы данных продуктов -->
+<!-- Заголовок раздела "База данных продуктов" убран по требованию пользователя -->
+<!-- Описание убрано по просьбе пользователя -->
+
+<label style="display:block;margin:8px 0;">Доля остатка min: <input type="number" id="minTailPercent" value="1" min="1" max="100" style="width:80px;"></label>
+<label style="display:block;margin:8px 0;">Количество прогонов: <input type="number" id="runCount" value="100" min="1" style="width:80px;"></label>
+<label style="display:block;margin:8px 0;"><input type="checkbox" id="collapseColumns"> Свернуть таблицу</label>
+<table id="productTable">
+  <thead>
+    <tr>
+      <th>Пул</th>
+      <th>Продукт</th>
+      <th class="nutrient-col">Белки/100г</th>
+      <th class="nutrient-col">Нас. жиры/100г</th>
+      <th class="nutrient-col">Ненас. жиры/100г</th>
+      <th class="nutrient-col">Простые угл./100г</th>
+      <th class="nutrient-col">Сложные угл./100г</th>
+      <th class="nutrient-col">Клетч. раствор./100г</th>
+      <th class="nutrient-col">Клетч. нераств./100г</th>
+      <th class="nutrient-col">Ккал/100г</th>
+      <th>Шаг, г</th>
+      <th>Макс. порций</th>
+      <th>Вес max, г</th>
+      <th>Вес в рационе, г</th>
+      <th>Фиксировать</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<!-- Убраны контейнеры предложений и графика -->
+
+<script>
+  // Embedded database converted from products_db.csv.  Each product has
+  // nutrient values per 100 g, a step (portion size) in grams and a
+  // maximum number of portions (not used in this demo but included for
+  // completeness).
+  const products = [
+    {name: "Банан", step: 10.00, protein: 1.20, saturatedFat: 0.10, unsaturatedFat: 0.10, simpleCarbs: 15.00, complexCarbs: 8.00, solubleFiber: 1.30, insolubleFiber: 1.80, calories: 103.25, maxPortions: 10.00},
+    {name: "Грецкий оерх", step: 1.00, protein: 15.20, saturatedFat: 6.10, unsaturatedFat: 57.10, simpleCarbs: 2.60, complexCarbs: 7.00, solubleFiber: 2.00, insolubleFiber: 4.00, calories: 677.00, maxPortions: 15.00},
+    {name: "Гречка", step: 10.00, protein: 13.20, saturatedFat: 0.70, unsaturatedFat: 2.00, simpleCarbs: 1.40, complexCarbs: 62.00, solubleFiber: 1.10, insolubleFiber: 5.90, calories: 341.20, maxPortions: 12.00},
+    {name: "Картофель сырой", step: 25.00, protein: 2.00, saturatedFat: 0.00, unsaturatedFat: 0.10, simpleCarbs: 1.20, complexCarbs: 17.00, solubleFiber: 0.50, insolubleFiber: 1.50, calories: 84.70, maxPortions: 10.00},
+    {name: "Макароны", step: 10.00, protein: 12.50, saturatedFat: 0.30, unsaturatedFat: 0.80, simpleCarbs: 1.10, complexCarbs: 70.50, solubleFiber: 1.20, insolubleFiber: 2.50, calories: 351.85, maxPortions: 20.00},
+    {name: "Масло оливковое", step: 1.00, protein: 0.00, saturatedFat: 14.00, unsaturatedFat: 86.00, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 900.00, maxPortions: 10.00},
+    {name: "Масло подсолнечное", step: 1.00, protein: 0.00, saturatedFat: 11.00, unsaturatedFat: 84.50, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 859.50, maxPortions: 10.00},
+    {name: "Маш", step: 5.00, protein: 23.00, saturatedFat: 0.30, unsaturatedFat: 1.50, simpleCarbs: 3.00, complexCarbs: 59.00, solubleFiber: 1.50, insolubleFiber: 6.50, calories: 368.20, maxPortions: 10.00},
+    {name: "Миндаль", step: 1.00, protein: 21.20, saturatedFat: 3.70, unsaturatedFat: 44.50, simpleCarbs: 4.40, complexCarbs: 9.50, solubleFiber: 3.30, insolubleFiber: 8.60, calories: 592.05, maxPortions: 30.00},
+    {name: "Молоко", step: 450.00, protein: 3.00, saturatedFat: 1.90, unsaturatedFat: 1.30, simpleCarbs: 4.80, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 60.00, maxPortions: 1.00},
+    {name: "Отруби пшеничные", step: 1.00, protein: 15.00, saturatedFat: 2.20, unsaturatedFat: 0.70, simpleCarbs: 2.00, complexCarbs: 4.00, solubleFiber: 8.00, insolubleFiber: 32.00, calories: 170.10, maxPortions: 10.00},
+    {name: "Протеин", step: 1.00, protein: 79.50, saturatedFat: 3.30, unsaturatedFat: 0.00, simpleCarbs: 0.00, complexCarbs: 15.00, solubleFiber: 0.00, insolubleFiber: 2.10, calories: 410.85, maxPortions: 30.00},
+    {name: "Рис*", step: 80.00, protein: 7.50, saturatedFat: 0.10, unsaturatedFat: 0.10, simpleCarbs: 0.30, complexCarbs: 75.70, solubleFiber: 0.20, insolubleFiber: 0.80, calories: 337.30, maxPortions: 1.00},
+    {name: "Семена чиа", step: 1.00, protein: 16.00, saturatedFat: 3.70, unsaturatedFat: 26.70, simpleCarbs: 1.00, complexCarbs: 6.00, solubleFiber: 6.00, insolubleFiber: 31.00, calories: 421.10, maxPortions: 10.00},
+    {name: "Семечки подсолнечника*", step: 1.00, protein: 21.00, saturatedFat: 5.00, unsaturatedFat: 48.00, simpleCarbs: 1.00, complexCarbs: 2.00, solubleFiber: 1.50, insolubleFiber: 4.50, calories: 582.00, maxPortions: 30.00},
+    {name: "Тилапия", step: 120.00, protein: 20.10, saturatedFat: 0.80, unsaturatedFat: 1.70, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 102.90, maxPortions: 1.00},
+    {name: "Филе куриное", step: 250.00, protein: 23.60, saturatedFat: 0.50, unsaturatedFat: 1.20, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 109.70, maxPortions: 1.00},
+    {name: "Филе пангасиуса*", step: 200.00, protein: 15.00, saturatedFat: 1.00, unsaturatedFat: 2.00, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 87.00, maxPortions: 1.00},
+    {name: "Хлопья овсяные", step: 2.00, protein: 14.00, saturatedFat: 1.20, unsaturatedFat: 4.80, simpleCarbs: 1.50, complexCarbs: 55.00, solubleFiber: 4.50, insolubleFiber: 6.50, calories: 352.50, maxPortions: 30.00},
+    {name: "Чечевица (крупа)*", step: 5.00, protein: 22.00, saturatedFat: 0.50, unsaturatedFat: 3.50, simpleCarbs: 2.00, complexCarbs: 60.00, solubleFiber: 2.50, insolubleFiber: 8.50, calories: 388.50, maxPortions: 10.00},
+    {name: "Яйцо куриное", step: 70.00, protein: 12.60, saturatedFat: 3.10, unsaturatedFat: 8.00, simpleCarbs: 0.60, complexCarbs: 0.60, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 155.10, maxPortions: 2.00},
+    {name: "Филе бедра без кожи куриное", step: 10.00, protein: 20.00, saturatedFat: 1.20, unsaturatedFat: 2.80, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 116.00, maxPortions: 25.00},
+    {name: "Морковь", step: 10.00, protein: 0.90, saturatedFat: 0.03, unsaturatedFat: 0.19, simpleCarbs: 4.70, complexCarbs: 4.10, solubleFiber: 1.40, insolubleFiber: 2.40, calories: 46.48, maxPortions: 10.00},
+    {name: "Кальмар сушеный", step: 5.00, protein: 62.00, saturatedFat: 0.80, unsaturatedFat: 2.20, simpleCarbs: 0.00, complexCarbs: 5.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 295.00, maxPortions: 6.00},
+    {name: "Фисташки в скорлупе", step: 5.00, protein: 12.40, saturatedFat: 3.40, unsaturatedFat: 23.50, simpleCarbs: 4.70, complexCarbs: 9.80, solubleFiber: 1.30, insolubleFiber: 4.00, calories: 357.65, maxPortions: 6.00},
+    {name: "Пиво Bud Zero", step: 450.00, protein: 0.40, saturatedFat: 0.00, unsaturatedFat: 0.00, simpleCarbs: 2.80, complexCarbs: 3.20, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 25.60, maxPortions: 1.00},
+    {name: "Финики с косточкой", step: 5.00, protein: 1.60, saturatedFat: 0.03, unsaturatedFat: 0.04, simpleCarbs: 54.90, complexCarbs: 6.80, solubleFiber: 2.70, insolubleFiber: 3.80, calories: 263.58, maxPortions: 5.00},
+    {name: "Семена льна", step: 1.00, protein: 18.30, saturatedFat: 3.70, unsaturatedFat: 35.90, simpleCarbs: 1.60, complexCarbs: 1.80, solubleFiber: 3.30, insolubleFiber: 24.50, calories: 484.90, maxPortions: 15.00},
+    {name: "Груша вяленая", step: 25.00, protein: 1.50, saturatedFat: 0.10, unsaturatedFat: 0.30, simpleCarbs: 42.00, complexCarbs: 12.80, solubleFiber: 3.80, insolubleFiber: 6.20, calories: 243.80, maxPortions: 1.00},
+    {name: "Сахар", step: 5.00, protein: 0.00, saturatedFat: 0.00, unsaturatedFat: 0.00, simpleCarbs: 100.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 0.00, maxPortions: 2.00}
+  ];
+
+  // Nutrient targets.  These can be adjusted to suit the user; they are
+  // initialised here based on the example given by the user.  Calories
+  // are derived from the macro formula: 4*protein + 9*(sat+unsat) +
+  // 4*(simple+complex) + 1.5*(soluble+insoluble).
+  const targets = {
+    protein: 140,
+    saturatedFat: 18,
+    unsaturatedFat: 60,
+    simpleCarbs: 29,
+    complexCarbs: 226,
+    solubleFiber: 10,
+    insolubleFiber: 25,
+    calories: 0
+  };
+  // compute calories from macro targets
+  targets.calories = 4 * targets.protein + 9 * (targets.saturatedFat + targets.unsaturatedFat) + 4 * (targets.simpleCarbs + targets.complexCarbs) + 1.5 * (targets.solubleFiber + targets.insolubleFiber);
+
+  // Weights for error calculation (higher weight means the nutrient is
+  // prioritised more in the optimisation).  These can be tuned.
+  const weights = {
+    protein: 2,
+    saturatedFat: 1,
+    unsaturatedFat: 1,
+    simpleCarbs: 1,
+    complexCarbs: 1,
+    solubleFiber: 1,
+    insolubleFiber: 1,
+    calories: 3
+  };
+    // Fraction of the residual used in each round of the iterative optimisation.  This
+    // value is controlled by a slider (1–100) below the comparison table.  A value
+    // of 50 means half of the remaining residual is targeted in each iteration.
+    let residualFraction = 0.5;
+    // Latest ОСО value; used to determine the lower bound of residual fraction search
+    let currentOSO = 0;
+
+
+  // Build the product selection table dynamically.
+  const tbody = document.querySelector('#productTable tbody');
+  // Создаём строки таблицы с интерактивными элементами: выбор, шаг, макс порций, вес и фиксацию.
+  products.forEach((p, idx) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="checkbox" id="sel_${idx}"></td>
+      <td>${p.name}</td>
+      <td class="nutrient-col">${p.protein.toFixed(2)}</td>
+      <td class="nutrient-col">${p.saturatedFat.toFixed(2)}</td>
+      <td class="nutrient-col">${p.unsaturatedFat.toFixed(2)}</td>
+      <td class="nutrient-col">${p.simpleCarbs.toFixed(2)}</td>
+      <td class="nutrient-col">${p.complexCarbs.toFixed(2)}</td>
+      <td class="nutrient-col">${p.solubleFiber.toFixed(2)}</td>
+      <td class="nutrient-col">${p.insolubleFiber.toFixed(2)}</td>
+      <td class="nutrient-col">${p.calories.toFixed(2)}</td>
+      <td><input type="number" id="step_${idx}" value="${p.step.toFixed(2)}" min="0" step="0.01"></td>
+      <td><input type="number" id="max_${idx}" value="${p.maxPortions.toFixed(2)}" min="0" step="1"></td>
+      <td id="weight_${idx}">${(p.step * p.maxPortions).toFixed(2)}</td>
+      <td><input type="number" id="diet_${idx}" value="${(p.step * p.maxPortions).toFixed(2)}" min="0" step="${p.step.toFixed(2)}" max="${(p.step * p.maxPortions).toFixed(2)}" disabled></td>
+      <td><input type="checkbox" id="fix_${idx}"></td>
+    `;
+    tbody.appendChild(tr);
+    // Получаем ссылки на элементы ввода и ячейку веса
+    const stepInput  = tr.querySelector('#step_' + idx);
+    const maxInput   = tr.querySelector('#max_' + idx);
+    const weightCell = tr.querySelector('#weight_' + idx);
+    const dietInput  = tr.querySelector('#diet_' + idx);
+    const fixCb      = tr.querySelector('#fix_' + idx);
+    const selCb      = tr.querySelector('#sel_' + idx);
+    // Функция обновления максимального веса и атрибутов dietInput
+    function updateWeight() {
+      const stepVal = parseFloat(stepInput.value) || 0;
+      const maxVal  = parseFloat(maxInput.value) || 0;
+      const maxWeight = stepVal * maxVal;
+      weightCell.textContent = maxWeight.toFixed(2);
+      // Обновляем ограничения и шаг для веса в рационе
+      if (dietInput) {
+        // Обновляем максимальный вес и шаг для поля ввода
+        dietInput.setAttribute('max', maxWeight.toFixed(2));
+        dietInput.setAttribute('step', stepVal.toFixed(2));
+        if (!fixCb.checked) {
+          // Если продукт не зафиксирован, отображаем максимальный вес
+          dietInput.value = maxWeight.toFixed(2);
+        } else {
+          // Если продукт зафиксирован, корректируем введённый вес
+          let val = parseFloat(dietInput.value);
+          if (isNaN(val) || val < 0) {
+            val = 0;
+          }
+          // Ограничиваем сверху максимальным весом
+        if (val > maxWeight) {
+            val = maxWeight;
+        }
+        // Округление к ближайшему кратному шага (если шаг > 0)
+        if (stepVal > 0) {
+          // Сначала округляем до ближайшего значения шага
+          let rounded = Math.round(val / stepVal) * stepVal;
+          // Если округление превысило максимум, корректируем вниз
+          if (rounded > maxWeight) {
+            rounded = Math.floor(maxWeight / stepVal) * stepVal;
+          }
+          // Если округление привело к отрицательному, корректируем вверх
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          val = rounded;
+        } else {
+          // если шаг нулевой или некорректный, просто ограничиваем
+          if (val < 0) val = 0;
+        }
+        dietInput.value = val.toFixed(2);
+        }
+      }
+    }
+    // Обработчики изменений для шага и максимума порций
+    stepInput.addEventListener('input', () => {
+      p.step = parseFloat(stepInput.value) || 0;
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении шага
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    maxInput.addEventListener('input', () => {
+      p.maxPortions = parseFloat(maxInput.value) || 0;
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении максимального числа порций
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    // Подсветка строки при выборе продукта
+    selCb.addEventListener('change', () => {
+      if (selCb.checked) {
+        tr.classList.add('selected-row');
+      } else {
+        tr.classList.remove('selected-row');
+      }
+      // Пересчитать оптимальный рацион при изменении выбора
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    // Подсветка ячейки веса при фиксации
+    fixCb.addEventListener('change', () => {
+      if (fixCb.checked) {
+        // Разрешить ввод веса в рационе и подсветить его ячейку
+        if (dietInput) {
+          dietInput.disabled = false;
+          // Перекрашиваем: подсветка только для ячейки веса в рационе
+          dietInput.parentElement.classList.add('fixed-weight');
+          weightCell.classList.remove('fixed-weight');
+          // Установить значение по умолчанию равное максимальному весу, если пусто
+          const maxVal = weightCell.textContent;
+          if (!dietInput.value || parseFloat(dietInput.value) === 0) {
+            dietInput.value = maxVal;
+          }
+        }
+      } else {
+        // Отключить ввод и убрать подсветку
+        if (dietInput) {
+          dietInput.disabled = true;
+          dietInput.parentElement.classList.remove('fixed-weight');
+          weightCell.classList.remove('fixed-weight');
+          // Сбросить значение на максимальный вес
+          dietInput.value = weightCell.textContent;
+        }
+      }
+      // При смене статуса фиксации обновляем ограничение на вес и шаг
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении фиксации
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+
+    // Обработка изменений введённого веса в рационе (доступно только при фиксации)
+    if (dietInput) {
+      /*
+        Пользователь может свободно вводить значение в поле "Вес в рационе",
+        поэтому в процессе ввода мы не пересчитываем рацион и не исправляем
+        число.  После завершения ввода (при потере фокуса или по событию
+        change, которое также срабатывает при изменении с помощью стрелочек),
+        значение округляется вниз к ближайшему кратному шага и затем
+        запускается пересчёт оптимального рациона.  Это позволяет вводить
+        произвольные числа, а также корректно использовать стрелочки для
+        увеличения/уменьшения веса.
+      */
+      // Функция округления веса к ближайшему меньшему кратному шага и запуска пересчёта
+      const adjustToStep = () => {
+        const maxVal = parseFloat(weightCell.textContent) || 0;
+        let val = parseFloat(dietInput.value);
+        if (isNaN(val) || val < 0) {
+          val = 0;
+        }
+        // Получаем размер шага из поля шага или исходного значения продукта
+        const stepValParsed = parseFloat(stepInput.value);
+        const stepVal = (!isNaN(stepValParsed) && stepValParsed > 0) ? stepValParsed : (p.step || 0);
+        // Округление к ближайшему кратному шага (если шаг > 0)
+        if (stepVal > 0) {
+          let rounded = Math.round(val / stepVal) * stepVal;
+          // Корректируем в пределах [0, maxVal]
+          if (rounded > maxVal) {
+            rounded = Math.floor(maxVal / stepVal) * stepVal;
+          }
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          val = rounded;
+        } else {
+          // если шаг нулевой, просто ограничиваем максимумом
+          if (val > maxVal) {
+            val = maxVal;
+          }
+        }
+        dietInput.value = val.toFixed(2);
+        // После округления пересчитываем рацион
+        if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+      };
+      // Событие blur — пользователь закончил вводить число
+      dietInput.addEventListener('blur', adjustToStep);
+      // Событие change — значение изменилось (в том числе через стрелочки)
+      dietInput.addEventListener('change', adjustToStep);
+      // На событие input пересчёт не выполняем, чтобы не мешать вводу
+    }
+  });
+
+  const collapseCb = document.getElementById('collapseColumns');
+  collapseCb.addEventListener('change', () => {
+    document.getElementById('productTable').classList.toggle('collapsed', collapseCb.checked);
+  });
+  const minTailInput = document.getElementById('minTailPercent');
+  minTailInput.addEventListener('change', () => {
+    minTailInput.dataset.userSet = 'true';
+    if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+  });
+  const runCountInput = document.getElementById('runCount');
+  runCountInput.addEventListener('change', () => {
+    if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+  });
+
+  // Инициализация радарной диаграммы удалена, так как график больше не используется
+
+  // Compute weighted error for a residual vector
+  function computeError(residual) {
+    let err = 0;
+    for (const k in residual) {
+      const r = residual[k];
+      err += weights[k] * r * r;
+    }
+    return err;
+  }
+
+  /**
+   * Perform an iterative optimisation of product weights.  Given a set
+   * of variable product indices and a residual nutrient vector (targets minus
+   * fixed contributions), this routine allocates weights to the products
+   * in several rounds.  In each round it attempts to cover half of the
+   * remaining residual using a weighted least squares solution.  The
+   * resulting per‑product increments are rounded to the nearest
+   * permissible portion (step size) and capped by the product's
+   * maximum allowable weight.  After each round the residual is
+   * updated and any products that can no longer accept additional
+   * weight are removed from consideration.  Iteration stops when no
+   * further weight can be added or after a fixed number of rounds.
+   *
+   * @param {Array<number>} varIdxs  Array of indices of products to optimise.
+   * @param {Object} resid           Residual nutrient needs (target minus fixed contributions).
+   * @returns {Object}               A map from product index to optimised weight in grams.
+   */
+  function runIterativeOptimization(varIdxs, resid) {
+    // Create a copy of the residual that we can mutate during iterations
+    const residVec = {};
+    for (const k in resid) {
+      residVec[k] = resid[k];
+    }
+    // Prepare per‑product step and maximum weights, and initialise weight map
+    const varAddMap = {};
+    const stepVals  = {};
+    const maxVals   = {};
+    varIdxs.forEach(idx => {
+      const p = products[idx];
+      const step = p.step > 0 ? p.step : 0;
+      stepVals[idx] = step;
+      maxVals[idx] = step * p.maxPortions;
+      varAddMap[idx] = 0;
+    });
+    // Determine consistent order of nutrient keys using the weights object
+    const nutKeys = Object.keys(weights);
+    // Active variables (indices) are those that still have capacity to receive weight
+    let active = varIdxs.slice();
+    let iteration = 0;
+    const maxIter = 10;
+    while (active.length > 0 && iteration < maxIter) {
+      // Filter out variables that cannot accept at least half a portion
+      active = active.filter(idx => {
+        const remaining = maxVals[idx] - varAddMap[idx];
+        const step = stepVals[idx];
+        return step > 0 && remaining >= step / 2;
+      });
+      if (active.length === 0) break;
+      const m = active.length;
+      // Build per‑gram nutrient matrix for active products
+      const pmat = [];
+      for (let i = 0; i < m; i++) {
+        const idx = active[i];
+        const p = products[idx];
+        const row = [];
+        nutKeys.forEach(k => {
+          row.push(p[k] / 100.0);
+        });
+        pmat.push(row);
+      }
+      // Build weighted Gram matrix G and right‑hand side vector b for 50% of the residual
+      const G = [];
+      const bVec = new Array(m).fill(0);
+      for (let i = 0; i < m; i++) {
+        G[i] = new Array(m).fill(0);
+        let sumB = 0;
+        for (let k = 0; k < nutKeys.length; k++) {
+          const w = weights[nutKeys[k]];
+          // Apply the global residualFraction to determine how much of the
+          // remaining residual should be targeted in this round
+          const targetScaled = residVec[nutKeys[k]] * residualFraction;
+          sumB += w * targetScaled * pmat[i][k];
+        }
+        bVec[i] = sumB;
+        for (let j = 0; j < m; j++) {
+          let sumG = 0;
+          for (let k2 = 0; k2 < nutKeys.length; k2++) {
+            const w = weights[nutKeys[k2]];
+            sumG += w * pmat[i][k2] * pmat[j][k2];
+          }
+          G[i][j] = sumG;
+        }
+      }
+      // Solve the system G x = b with non‑negative constraint by iteratively
+      // dropping negative components.  Adapted from existing code.
+      let activeIdxs = active.slice();
+      let activeG = G.map(row => row.slice());
+      let activeB = bVec.slice();
+      let sol = [];
+      while (true) {
+        const m2 = activeIdxs.length;
+        if (m2 === 0) break;
+        // Build augmented matrix for Gaussian elimination
+        const aug = new Array(m2);
+        for (let i = 0; i < m2; i++) {
+          aug[i] = activeG[i].slice();
+          aug[i].push(activeB[i]);
+        }
+        // Gaussian elimination with partial pivoting
+        for (let col = 0; col < m2; col++) {
+          // Find pivot
+          let pivot = col;
+          let maxVal = Math.abs(aug[col][col]);
+          for (let i2 = col + 1; i2 < m2; i2++) {
+            const val = Math.abs(aug[i2][col]);
+            if (val > maxVal) {
+              maxVal = val;
+              pivot = i2;
+            }
+          }
+          if (pivot !== col) {
+            const tmp = aug[pivot];
+            aug[pivot] = aug[col];
+            aug[col] = tmp;
+          }
+          if (Math.abs(aug[col][col]) < 1e-12) continue;
+          const pivVal = aug[col][col];
+          for (let j = col; j <= m2; j++) {
+            aug[col][j] /= pivVal;
+          }
+          for (let i2 = 0; i2 < m2; i2++) {
+            if (i2 === col) continue;
+            const factor = aug[i2][col];
+            for (let j = col; j <= m2; j++) {
+              aug[i2][j] -= factor * aug[col][j];
+            }
+          }
+        }
+        // Back substitution
+        const solVec = new Array(m2).fill(0);
+        for (let i2 = m2 - 1; i2 >= 0; i2--) {
+          solVec[i2] = aug[i2][m2];
+          for (let j = i2 + 1; j < m2; j++) {
+            solVec[i2] -= aug[i2][j] * solVec[j];
+          }
+        }
+        // Identify negative components
+        const neg = [];
+        for (let i2 = 0; i2 < m2; i2++) {
+          if (solVec[i2] < 0) neg.push(i2);
+        }
+        if (neg.length === 0) {
+          sol = solVec;
+          break;
+        }
+        // Remove negative indices and re‑solve
+        const newActiveIdxs = [];
+        const newActiveB    = [];
+        const newActiveG    = [];
+        for (let i2 = 0; i2 < m2; i2++) {
+          if (!neg.includes(i2)) {
+            newActiveIdxs.push(activeIdxs[i2]);
+            newActiveB.push(activeB[i2]);
+          }
+        }
+        for (let i2 = 0; i2 < m2; i2++) {
+          if (!neg.includes(i2)) {
+            const row = [];
+            for (let j = 0; j < m2; j++) {
+              if (!neg.includes(j)) {
+                row.push(activeG[i2][j]);
+              }
+            }
+            newActiveG.push(row);
+          }
+        }
+        activeIdxs = newActiveIdxs;
+        activeB   = newActiveB;
+        activeG   = newActiveG;
+      }
+      // Apply increments to products based on solution
+      if (!sol || sol.length === 0) {
+        break;
+      }
+      let anyPositive = false;
+      for (let i = 0; i < activeIdxs.length; i++) {
+        const idx = activeIdxs[i];
+        let grams = sol[i];
+        if (!grams || grams <= 0) {
+          continue;
+        }
+        // Cap by remaining capacity
+        let remaining = maxVals[idx] - varAddMap[idx];
+        if (remaining <= 0) continue;
+        if (grams > remaining) {
+          grams = remaining;
+        }
+        // Round to nearest multiple of the product's step
+        const step = stepVals[idx];
+        if (step > 0) {
+          let rounded = Math.round(grams / step) * step;
+          if (rounded > remaining) {
+            rounded = Math.floor(remaining / step) * step;
+          }
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          grams = rounded;
+        }
+        if (grams <= 0) {
+          continue;
+        }
+        // Update weight allocation
+        varAddMap[idx] += grams;
+        anyPositive = true;
+        // Update residual using the actual contribution of the increment
+        const p = products[idx];
+        nutKeys.forEach(key => {
+          residVec[key] -= (p[key] / 100.0) * grams;
+        });
+      }
+      // Stop if no increments were applied in this round
+      if (!anyPositive) {
+        break;
+      }
+      iteration++;
+    }
+    return varAddMap;
+  }
+
+  function evaluateDiet(varIdxs, resid, totalsFixed, fixedIndices, rf) {
+    const prevRF = residualFraction;
+    residualFraction = rf;
+    const varAdd = new Array(products.length).fill(0);
+    if (varIdxs.length > 0) {
+      const varMap = runIterativeOptimization(varIdxs, resid);
+      varIdxs.forEach(idx => { varAdd[idx] = varMap[idx] || 0; });
+    }
+    const totalsVar = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    varIdxs.forEach(idx => {
+      const grams = varAdd[idx];
+      if (grams > 0) {
+        const p = products[idx];
+        const factor = grams / 100.0;
+        totalsVar.protein        += p.protein        * factor;
+        totalsVar.saturatedFat   += p.saturatedFat   * factor;
+        totalsVar.unsaturatedFat += p.unsaturatedFat * factor;
+        totalsVar.simpleCarbs    += p.simpleCarbs    * factor;
+        totalsVar.complexCarbs   += p.complexCarbs   * factor;
+        totalsVar.solubleFiber   += p.solubleFiber   * factor;
+        totalsVar.insolubleFiber += p.insolubleFiber * factor;
+        totalsVar.calories       += p.calories       * factor;
+      }
+    });
+    const totalsFinal = {};
+    for (const k in totalsFixed) {
+      totalsFinal[k] = totalsFixed[k] + totalsVar[k];
+    }
+    let errSum = 0;
+    let nKeys = 0;
+    for (const k in targets) {
+      const diff = targets[k] - totalsFinal[k];
+      errSum += weights[k] * diff * diff;
+      nKeys++;
+    }
+    const rmse = nKeys > 0 ? Math.sqrt(errSum / nKeys) : 0;
+    const allVarIdxs = [];
+    for (let i = 0; i < products.length; i++) {
+      if (!fixedIndices.has(i)) allVarIdxs.push(i);
+    }
+    let fullMap = {};
+    let totalsFull = null;
+    let rmseFull = 0;
+    if (allVarIdxs.length > 0) {
+      fullMap = runIterativeOptimization(allVarIdxs, resid);
+      const totalsVarFull = {
+        protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+        complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+      };
+      for (const idx of allVarIdxs) {
+        const grams = fullMap[idx] || 0;
+        if (grams > 0) {
+          const p = products[idx];
+          const factor = grams / 100.0;
+          totalsVarFull.protein        += p.protein        * factor;
+          totalsVarFull.saturatedFat   += p.saturatedFat   * factor;
+          totalsVarFull.unsaturatedFat += p.unsaturatedFat * factor;
+          totalsVarFull.simpleCarbs    += p.simpleCarbs    * factor;
+          totalsVarFull.complexCarbs   += p.complexCarbs   * factor;
+          totalsVarFull.solubleFiber   += p.solubleFiber   * factor;
+          totalsVarFull.insolubleFiber += p.insolubleFiber * factor;
+          totalsVarFull.calories       += p.calories       * factor;
+        }
+      }
+      totalsFull = {};
+      for (const k in totalsFixed) {
+        totalsFull[k] = totalsFixed[k] + totalsVarFull[k];
+      }
+      let errSumFull = 0;
+      let countKeys = 0;
+      for (const k in targets) {
+        const diff = targets[k] - totalsFull[k];
+        errSumFull += weights[k] * diff * diff;
+        countKeys++;
+      }
+      rmseFull = countKeys > 0 ? Math.sqrt(errSumFull / countKeys) : 0;
+    } else {
+      totalsFull = {};
+      for (const k in totalsFixed) {
+        totalsFull[k] = totalsFixed[k];
+      }
+      let errSumFull = 0;
+      let countKeys = 0;
+      for (const k in targets) {
+        const diff = targets[k] - totalsFull[k];
+        errSumFull += weights[k] * diff * diff;
+        countKeys++;
+      }
+      rmseFull = countKeys > 0 ? Math.sqrt(errSumFull / countKeys) : 0;
+    }
+    residualFraction = prevRF;
+    return {varAdd, totalsFinal, rmse, totalsFull, rmseFull, fullMap};
+  }
+
+  /**
+   * Compute an optimal diet based on the current product selections, steps,
+   * max portions and fixed flags.  Uses a greedy approximation of a convex
+   * optimisation to minimise the weighted squared error between the
+   * achieved and target nutrient totals.  Fixed products contribute
+   * their full weight (step*maxPortions) while variable products may
+   * receive any non‑negative multiple of their step up to the maximum.
+   * The results (optimal weights, nutrient totals, RMSE and a
+   * comparison table) are rendered into the #optimalDietContainer.
+   */
+  function computeOptimalDiet() {
+    if (typeof updateTargetsFromSummary === 'function') {
+      updateTargetsFromSummary();
+    }
+    const resultDiv = document.getElementById('optimalDietContainer');
+    if (!resultDiv) return;
+    const totalsFixed = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    const fixedIndices = new Set();
+    const variableIndices = new Set();
+    let maxCalPerPortion = 0;
+    products.forEach((p, idx) => {
+      const sel = document.getElementById('sel_' + idx);
+      if (sel && sel.checked) {
+        const portionCal = p.calories * (p.step / 100);
+        if (portionCal > maxCalPerPortion) maxCalPerPortion = portionCal;
+        const fixCb = document.getElementById('fix_' + idx);
+        if (fixCb && fixCb.checked) {
+          fixedIndices.add(idx);
+          const dietEl = document.getElementById('diet_' + idx);
+          const g = dietEl ? (parseFloat(dietEl.value) || 0) : 0;
+          const factor = g / 100.0;
+          totalsFixed.protein        += p.protein        * factor;
+          totalsFixed.saturatedFat   += p.saturatedFat   * factor;
+          totalsFixed.unsaturatedFat += p.unsaturatedFat * factor;
+          totalsFixed.simpleCarbs    += p.simpleCarbs    * factor;
+          totalsFixed.complexCarbs   += p.complexCarbs   * factor;
+          totalsFixed.solubleFiber   += p.solubleFiber   * factor;
+          totalsFixed.insolubleFiber += p.insolubleFiber * factor;
+          totalsFixed.calories       += p.calories       * factor;
+        } else {
+          variableIndices.add(idx);
+        }
+      }
+    });
+    if (fixedIndices.size === 0 && variableIndices.size === 0) {
+      resultDiv.innerHTML = '<p>Выберите продукты для расчёта оптимального рациона.</p>';
+      return;
+    }
+    const resid = {};
+    for (const k in targets) {
+      resid[k] = targets[k] - totalsFixed[k];
+    }
+    const varIdxs = Array.from(variableIndices);
+    const minTailEl = document.getElementById('minTailPercent');
+    if (!minTailEl.dataset.userSet && currentOSO > 0) {
+      let autoMin = Math.ceil((maxCalPerPortion / currentOSO) * 100);
+      if (autoMin < 1) autoMin = 1;
+      if (autoMin > 100) autoMin = 100;
+      minTailEl.value = autoMin;
+    }
+    let minPercent = parseInt(minTailEl.value, 10);
+    if (isNaN(minPercent) || minPercent < 1) minPercent = 1;
+    if (minPercent > 100) minPercent = 100;
+    minTailEl.value = minPercent;
+    const runCountEl = document.getElementById('runCount');
+    const runCount = parseInt(runCountEl.value, 10) || 1;
+    const heatData = [];
+    const runBest = Array(runCount).fill(null);
+    let bestSel = null;
+    let bestFull = null;
+    for (let perc = minPercent; perc <= 100; perc++) {
+      for (let run = 0; run < runCount; run++) {
+        const shuffled = varIdxs.slice();
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        const res = evaluateDiet(shuffled, resid, totalsFixed, fixedIndices, perc / 100);
+        heatData.push({ x: perc, y: run + 1, v: res.rmse });
+        if (!runBest[run] || res.rmse < runBest[run].rmse) {
+          runBest[run] = { run: run + 1, rf: perc, rmse: res.rmse };
+        }
+        if (!bestSel || res.rmse < bestSel.rmse) {
+          bestSel = res;
+          bestSel.rf = perc;
+          bestSel.run = run + 1;
+        }
+        if (!bestFull || res.rmseFull < bestFull.rmseFull) {
+          bestFull = res;
+          bestFull.rf = perc;
+          bestFull.run = run + 1;
+        }
+      }
+    }
+    const overallBest = runBest.reduce((a, b) => (a.rmse < b.rmse ? a : b));
+    const avgRf = runBest.reduce((sum, r) => sum + r.rf, 0) / runBest.length;
+    if (!bestSel || !bestFull) return;
+    residualFraction = bestSel.rf / 100;
+    products.forEach((p, idx) => {
+      const sel = document.getElementById('sel_' + idx);
+      if (sel && sel.checked) {
+        const dietEl = document.getElementById('diet_' + idx);
+        let finalGrams = 0;
+        if (fixedIndices.has(idx)) {
+          finalGrams = dietEl ? (parseFloat(dietEl.value) || 0) : 0;
+        } else {
+          finalGrams = bestSel.varAdd[idx];
+        }
+        if (dietEl) {
+          dietEl.value = finalGrams.toFixed(2);
+        }
+      }
+    });
+    const labelMap = {
+      protein: 'Белки',
+      saturatedFat: 'Жиры насыщённые',
+      unsaturatedFat: 'Жиры ненасыщённые',
+      simpleCarbs: 'Углеводы простые',
+      complexCarbs: 'Углеводы сложные перевариваемые',
+      solubleFiber: 'Клетчатка растворимая',
+      insolubleFiber: 'Клетчатка нерастворимая',
+      calories: 'Калории'
+    };
+    let html = '';
+    html += '<h3>Оптимизированный рацион</h3>';
+    const fullItems = [];
+    const selectedItems = [];
+    products.forEach((p, idx) => {
+      let selectedGrams = 0;
+      const sel = document.getElementById('sel_' + idx);
+      if (sel && sel.checked) {
+        if (fixedIndices.has(idx)) {
+          const dietEl = document.getElementById('diet_' + idx);
+          selectedGrams = dietEl ? (parseFloat(dietEl.value) || 0) : 0;
+        } else {
+          selectedGrams = bestSel.varAdd[idx];
+        }
+      }
+      let fullGrams = 0;
+      if (fixedIndices.has(idx)) {
+        const dietEl = document.getElementById('diet_' + idx);
+        fullGrams = dietEl ? (parseFloat(dietEl.value) || 0) : 0;
+      } else if (bestFull.fullMap[idx]) {
+        fullGrams = bestFull.fullMap[idx];
+      }
+      if (fullGrams > 0) fullItems.push({ name: p.name, grams: fullGrams });
+      if (selectedGrams > 0) selectedItems.push({ name: p.name, grams: selectedGrams });
+    });
+    // Sort products by weight descending for clearer comparison
+    fullItems.sort((a, b) => b.grams - a.grams);
+    selectedItems.sort((a, b) => b.grams - a.grams);
+    const maxLen = Math.max(fullItems.length, selectedItems.length);
+    html += '<table><thead><tr><th>Продукт (Полная база)</th><th>Вес (г)</th><th></th><th>Продукт (Выбранные)</th><th>Вес (г)</th></tr></thead><tbody>';
+    for (let i = 0; i < maxLen; i++) {
+      const f = fullItems[i];
+      const s = selectedItems[i];
+      html += `<tr><td>${f ? f.name : ''}</td><td>${f ? f.grams.toFixed(2) : ''}</td><td></td><td>${s ? s.name : ''}</td><td>${s ? s.grams.toFixed(2) : ''}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    html += '<h4>Сравнение целевых показателей и результатов оптимизации</h4>';
+    html += '<table><thead><tr><th>Показатель</th><th>Цель</th><th>Полная база</th><th>Выбранные</th></tr></thead><tbody>';
+    for (const k of Object.keys(labelMap)) {
+      const unit = (k === 'calories') ? '' : ' г';
+      const tgtVal = targets[k];
+      const tgtStr = tgtVal.toFixed(k === 'calories' ? 1 : 0) + unit;
+      const fullVal = bestFull.totalsFull[k] || 0;
+      const fullStr = fullVal.toFixed(k === 'calories' ? 1 : 0) + unit;
+      const finalVal = bestSel.totalsFinal[k];
+      const finalStr = finalVal.toFixed(k === 'calories' ? 1 : 0) + unit;
+      html += `<tr><td>${labelMap[k]}</td><td>${tgtStr}</td><td>${fullStr}</td><td>${finalStr}</td></tr>`;
+    }
+    html += `<tr><td><strong>Доля остатка</strong></td><td>—</td><td>${bestFull.rf}%</td><td>${bestSel.rf}%</td></tr>`;
+    html += `<tr><td><strong>RMSE</strong></td><td>—</td><td>${bestFull.rmseFull.toFixed(3)}</td><td>${bestSel.rmse.toFixed(3)}</td></tr>`;
+    html += '</tbody></table>';
+    html += '<div id="rmsePlot" style="height:600px; width:100%;"></div>';
+    html += '<div id="rfRunsPlot" style="height:400px; width:100%;"></div>';
+    html += '<div id="rmseBestPlot" style="height:600px; width:100%;"></div>';
+    html += '<div id="rmseBestControls" style="margin-top:8px;">'
+      + '<label><input type="checkbox" id="chkRmseMin"> RMSE min.</label> '
+      + '<label><input type="checkbox" id="chkRmseMinPath"> RMSE min path.</label> '
+      + '<label><input type="checkbox" id="chkAvgSteps"> avg. steps to RMSE under '
+      + '<input type="number" id="rmseThreshold" step="0.001" value="0.1" style="width:80px;"></label>'
+      + '</div>';
+    resultDiv.innerHTML = html;
+    const values = heatData.map(d => d.v);
+    const minSel = Math.min(...values);
+    const maxSel = Math.max(...values);
+    let runToMin = Infinity;
+    heatData.forEach(d => { if (d.v === minSel && d.y < runToMin) runToMin = d.y; });
+    const percents = [...new Set(heatData.map(d => d.x))].sort((a, b) => a - b);
+    const runsArr = Array.from({ length: runCount }, (_, i) => i + 1);
+    const rmseByPerc = {};
+    percents.forEach(p => rmseByPerc[p] = Array(runCount).fill(null));
+    heatData.forEach(d => { rmseByPerc[d.x][d.y - 1] = d.v; });
+    const zMatrix = runsArr.map(run => percents.map(p => {
+      const v = rmseByPerc[p][run - 1];
+      return v != null ? v - minSel + 1 : null;
+    }));
+    const colorMatrix = runsArr.map(run => percents.map(p => {
+      const v = rmseByPerc[p][run - 1];
+      if (v == null) return null;
+      const norm = (v - minSel) / (maxSel - minSel);
+      return Math.sqrt(norm);
+    }));
+    const bestMatrix = percents.map(p => {
+      const arr = rmseByPerc[p];
+      let best = Infinity;
+      return runsArr.map((_, idx) => {
+        const val = arr[idx];
+        if (val != null && val < best) best = val;
+        return best;
+      });
+    });
+    const flatBest = bestMatrix.flat().filter(v => Number.isFinite(v));
+    const minBest = Math.min(...flatBest);
+    const maxBest = Math.max(...flatBest);
+    const kDiffRmseMaxMin = maxBest / minBest;
+    const kDiffPower = Math.log2(kDiffRmseMaxMin);
+    // base threshold factor 2^k_Diff_RMSE_Max_Min
+    const base = 2 ** kDiffRmseMaxMin;
+    const thresholds = [
+      { v: minBest, color: '#f0fff0' },
+      { v: minBest * base ** (1/5), color: '#00ff00' },
+      { v: minBest * base ** (1/4), color: '#ffff00' },
+      { v: minBest * base ** (1/3), color: '#ffa500' },
+      { v: minBest * base ** (1/2), color: '#ff0000' },
+      { v: minBest * base, color: '#8b0000' }
+    ];
+    const maxScale = minBest * base;
+    const colorscaleBest = thresholds.map(({ v, color }) => [
+      (v - minBest) / (maxScale - minBest),
+      color
+    ]);
+    let sumLastRun = 0;
+    percents.forEach(p => {
+      const arr = rmseByPerc[p];
+      let best = Infinity;
+      let lastRun = 0;
+      arr.forEach((val, idx) => {
+        if (val != null && val < best) {
+          best = val;
+          lastRun = idx + 1;
+        }
+      });
+      sumLastRun += lastRun;
+    });
+    const avgStabRun = sumLastRun / percents.length;
+    const traceSurface = {
+      type: 'surface',
+      x: percents,
+      y: runsArr,
+      z: zMatrix,
+      surfacecolor: colorMatrix,
+      colorscale: [
+        [0, 'green'],
+        [0.5, 'yellow'],
+        [1, 'red']
+      ],
+      cmin: 0,
+      cmax: 1,
+      showscale: false,
+      contours: { x: { show: true }, y: { show: true } }
+    };
+    const layout = {
+      scene: {
+        xaxis: { title: 'Доля остатка (%)', range: [minPercent, 100] },
+        yaxis: { title: 'Прогон', range: [1, runCount] },
+        zaxis: { title: 'RMSE', type: 'log' }
+      },
+      annotations: [
+        { text: `min RMSE пула: ${bestSel.rmse.toFixed(3)}`, x: 1, y: 1, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'right', yanchor: 'top' },
+        { text: `min RMSE базы: ${bestFull.rmseFull.toFixed(3)}`, x: 1, y: 0.95, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'right', yanchor: 'top' }
+      ]
+    };
+    Plotly.newPlot('rmsePlot', [traceSurface], layout, {responsive: true});
+    const traceRuns = {
+      type: 'scatter',
+      x: runBest.map(r => r.run),
+      y: runBest.map(r => r.rf),
+      mode: 'lines+markers',
+      marker: {
+        color: runBest.map(r => r.run === overallBest.run ? 'red' : 'black'),
+        size: runBest.map(r => r.run === overallBest.run ? 10 : 6)
+      },
+      line: { color: 'black' }
+    };
+    const layoutRuns = {
+      xaxis: { title: 'Прогон', dtick: 1 },
+      yaxis: { title: 'Доля остатка (%)', range: [minPercent, 100] },
+      annotations: [{
+        text: `наименьший rmse ${overallBest.rmse.toFixed(3)}; средняя доля ${avgRf.toFixed(2)}%`,
+        x: 0,
+        y: 1,
+        xref: 'paper',
+        yref: 'paper',
+        showarrow: false,
+        xanchor: 'left',
+        yanchor: 'top'
+      }]
+    };
+    Plotly.newPlot('rfRunsPlot', [traceRuns], layoutRuns, {responsive: true});
+    const traceBest = {
+      type: 'surface',
+      x: runsArr,
+      y: percents,
+      z: bestMatrix,
+      colorscale: colorscaleBest,
+      cmin: minBest,
+      cmax: maxScale,
+      showscale: false,
+      contours: { x: { show: true }, y: { show: true } }
+    };
+    const layoutBest = {
+      scene: {
+        xaxis: { title: 'Прогон', range: [1, runCount] },
+        yaxis: { title: 'Доля остатка (%)', range: [minPercent, 100] },
+        zaxis: { title: 'Лучший RMSE', type: 'log' }
+      },
+      annotations: []
+    };
+    Plotly.newPlot('rmseBestPlot', [traceBest], layoutBest, {responsive: true});
+
+    const chkRmseMin = document.getElementById('chkRmseMin');
+    const chkRmseMinPath = document.getElementById('chkRmseMinPath');
+    const chkAvgSteps = document.getElementById('chkAvgSteps');
+    const rmseThresholdEl = document.getElementById('rmseThreshold');
+
+    function computeAvgSteps(thresh) {
+      let total = 0, count = 0;
+      percents.forEach(p => {
+        const arr = rmseByPerc[p];
+        let best = Infinity;
+        let runIdx = null;
+        arr.forEach((val, idx) => {
+          if (val != null && val < best) best = val;
+          if (runIdx === null && best <= thresh) runIdx = idx + 1;
+        });
+        if (runIdx !== null) { total += runIdx; count++; }
+      });
+      return count ? total / count : null;
+    }
+
+    function updateRmseBestAnnotations() {
+      const annotations = [];
+      let y = 1;
+      const add = txt => {
+        annotations.push({ text: txt, x: 0, y: y, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', yanchor: 'top' });
+        y -= 0.05;
+      };
+      add(`ср. прогон стабилизации: ${avgStabRun.toFixed(1)}`);
+      if (chkRmseMin.checked) add(`RMSE min: ${minSel.toFixed(3)}`);
+      if (chkRmseMinPath.checked) add(`RMSE min path: ${runToMin}`);
+      if (chkAvgSteps.checked) {
+        const threshold = parseFloat(rmseThresholdEl.value);
+        if (!isNaN(threshold)) {
+          const avg = computeAvgSteps(threshold);
+          if (avg !== null) add(`avg steps to RMSE under ${threshold}: ${avg.toFixed(1)}`);
+        }
+      }
+      Plotly.relayout('rmseBestPlot', { annotations });
+    }
+
+    chkRmseMin.addEventListener('change', updateRmseBestAnnotations);
+    chkRmseMinPath.addEventListener('change', updateRmseBestAnnotations);
+    chkAvgSteps.addEventListener('change', updateRmseBestAnnotations);
+    rmseThresholdEl.addEventListener('change', () => {
+      if (chkAvgSteps.checked) updateRmseBestAnnotations();
+    });
+
+    updateRmseBestAnnotations();
+  }
+
+  // Глобальные переменные для радарной диаграммы удалены, так как график больше не используется.
+
+  // Функция обновления радарной диаграммы удалена, так как график больше не используется.
+
+  /**
+   * Read the calculator summary table (inside #calculatorContainer) and
+   * update the global targets object accordingly.  The summary rows
+   * contain Russian labels and values like "146 г".  We map each
+   * label to the corresponding target key and parse the numeric
+   * portion.  Calories are stored with key 'calories'.  If some
+   * labels are missing or unparsable, the previous target values
+   * remain unchanged.
+   */
+  function updateTargetsFromSummary() {
+    const rows = document.querySelectorAll('#calculatorContainer #summary tr');
+    const nameMap = {
+      'Белки': 'protein',
+      'Жиры насыщенные': 'saturatedFat',
+      'Жиры ненасыщенные': 'unsaturatedFat',
+      'Углеводы простые': 'simpleCarbs',
+      'Углеводы сложные перевариваемые': 'complexCarbs',
+      'Клетчатка растворимая': 'solubleFiber',
+      'Клетчатка нерастворимая': 'insolubleFiber',
+      'ККал': 'calories'
+    };
+    rows.forEach(row => {
+      const tds = row.querySelectorAll('td');
+      if (tds.length === 2) {
+        const name = tds[0].textContent.trim();
+        const key = nameMap[name];
+        if (key) {
+          // Extract numeric part: allow comma or dot for decimals
+          const valStr = tds[1].textContent.replace(/[^0-9.,]/g, '').replace(',', '.');
+          const val = parseFloat(valStr);
+          if (!isNaN(val)) {
+            targets[key] = val;
+          }
+        }
+      }
+    });
+  }
+
+  // Main recalculation routine: compute totals from selected pool,
+  // propose additional items, update suggestions and radar chart.
+  function recalc() {
+    // Функция рекалькуляции отключена, так как таблица не интерактивная.
+    return;
+
+    /*
+      New optimisation logic: selected products can be fixed or variable.  Fixed products
+      keep their user-specified grams. Variable products (selected but not
+      fixed) will have their weights adjusted automatically to minimise
+      the residual error relative to the nutrient targets.  First we
+      compute contributions from fixed and variable products based on
+      current input values, then iteratively add portions to variable
+      products to reduce the residual.  After this assignment we run a
+      second greedy optimisation on the remaining (unselected) products
+      to suggest additional items for closing the tail.  Finally, we
+      compute and display RMSE and coverage comparisons.
+    */
+    // Prepare data structures
+    const totalsFixed = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    // Initialise totals for variable products.  Note: we no longer add
+    // contributions from user-entered grams for variable (unfixed) products;
+    // those weights will be determined entirely by the optimisation and
+    // rounded to step.  Therefore totalsVarInit starts at zero and only
+    // accumulates portions assigned by the optimisation below.
+    const totalsVarInit = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    // Sets for indices
+    const selectedIndices = new Set();
+    const fixedIndices = new Set();
+    const variableIndices = new Set();
+    // Track current grams for each product
+    const currentGrams = new Array(products.length).fill(0);
+    // Fill sets and initial totals based on user inputs
+    products.forEach((p, idx) => {
+      const sel = document.getElementById(`sel_${idx}`);
+      const gramsInput = document.getElementById(`g_${idx}`);
+      const fix = document.getElementById(`fix_${idx}`);
+      if (sel.checked) {
+        selectedIndices.add(idx);
+        // Determine fixed/variable state.  Fixed products keep the user-specified weight;
+        // variable products will have their weight computed by optimisation from scratch.
+        if (fix.checked) {
+          fixedIndices.add(idx);
+        } else {
+          variableIndices.add(idx);
+        }
+        // Obtain the user-entered grams.  For fixed products this is used; for variable
+        // products this is ignored for optimisation (treated as zero) but will be
+        // overwritten by the computed weight later.  Set currentGrams accordingly.
+        let grams = parseFloat(gramsInput.value) || 0;
+        grams = Math.max(0, grams);
+        if (fix.checked) {
+          currentGrams[idx] = grams;
+        } else {
+          // For variable products, treat current grams as 0 for optimisation purposes.
+          currentGrams[idx] = 0;
+        }
+        // Accumulate nutrient contributions for fixed products only.  Variable products
+        // contribute nothing at this stage.  totalsVarInit will be updated after
+        // optimisation.
+        if (fix.checked) {
+          const factor = grams / 100.0;
+          totalsFixed.protein        += p.protein        * factor;
+          totalsFixed.saturatedFat   += p.saturatedFat   * factor;
+          totalsFixed.unsaturatedFat += p.unsaturatedFat * factor;
+          totalsFixed.simpleCarbs    += p.simpleCarbs    * factor;
+          totalsFixed.complexCarbs   += p.complexCarbs   * factor;
+          totalsFixed.solubleFiber   += p.solubleFiber   * factor;
+          totalsFixed.insolubleFiber += p.insolubleFiber * factor;
+          totalsFixed.calories       += p.calories       * factor;
+        }
+        // Highlight fixed rows if applicable
+        if (fix.checked) {
+          gramsInput.closest('tr').classList.add('fixed-row');
+        } else {
+          gramsInput.closest('tr').classList.remove('fixed-row');
+        }
+      } else {
+        // Not selected: ensure row is not highlighted as fixed
+        gramsInput.closest('tr').classList.remove('fixed-row');
+      }
+    });
+
+    // Step 1: assign additional weight to variable products using continuous optimisation and rounding
+    // Compute remaining weight capacity for each variable product (in grams)
+    const remainingWeightVar = new Array(products.length).fill(0);
+    variableIndices.forEach(i => {
+      const maxInput = document.getElementById(`max_${i}`);
+      const maxPortions = parseFloat(maxInput?.value) || 0;
+      const p = products[i];
+      const remain = maxPortions * p.step - currentGrams[i];
+      remainingWeightVar[i] = remain > 0 ? remain : 0;
+    });
+    // Residual after fixed + initial variable grams
+    const residVar = {};
+    for (const k in targets) {
+      residVar[k] = Math.max(targets[k] - (totalsFixed[k] + totalsVarInit[k]), 0);
+    }
+    let baselineErrorVar = computeError(residVar);
+    // Additional grams for variable products
+    const varAdd = new Array(products.length).fill(0);
+    // Track nutrient totals contributed by additional variable portions (varAdd)
+    const totalsVarAdded = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    // Iteratively assign continuous weights and round down to step
+    const improvementThresholdVar = 1e-4;
+    const maxIterVar = 100;
+    let iterVar = 0;
+    while (iterVar < maxIterVar) {
+      iterVar++;
+      let bestIndex = -1;
+      let bestRounded = 0;
+      let bestImprovement = 0;
+      let bestNewResid = null;
+      variableIndices.forEach(i => {
+        // Skip if no remaining capacity for this product
+        const remain = remainingWeightVar[i];
+        if (!remain || remain < products[i].step) return;
+        const prod = products[i];
+        // compute continuous optimal weight (grams) for this product
+        let numerator = 0;
+        let denom = 0;
+        // Use nutrient per gram values
+        numerator += weights.protein        * residVar.protein        * (prod.protein        / 100.0);
+        denom    += weights.protein        * Math.pow(prod.protein        / 100.0, 2);
+        numerator += weights.saturatedFat   * residVar.saturatedFat   * (prod.saturatedFat   / 100.0);
+        denom    += weights.saturatedFat   * Math.pow(prod.saturatedFat   / 100.0, 2);
+        numerator += weights.unsaturatedFat * residVar.unsaturatedFat * (prod.unsaturatedFat / 100.0);
+        denom    += weights.unsaturatedFat * Math.pow(prod.unsaturatedFat / 100.0, 2);
+        numerator += weights.simpleCarbs    * residVar.simpleCarbs    * (prod.simpleCarbs    / 100.0);
+        denom    += weights.simpleCarbs    * Math.pow(prod.simpleCarbs    / 100.0, 2);
+        numerator += weights.complexCarbs   * residVar.complexCarbs   * (prod.complexCarbs   / 100.0);
+        denom    += weights.complexCarbs   * Math.pow(prod.complexCarbs   / 100.0, 2);
+        numerator += weights.solubleFiber   * residVar.solubleFiber   * (prod.solubleFiber   / 100.0);
+        denom    += weights.solubleFiber   * Math.pow(prod.solubleFiber   / 100.0, 2);
+        numerator += weights.insolubleFiber * residVar.insolubleFiber * (prod.insolubleFiber / 100.0);
+        denom    += weights.insolubleFiber * Math.pow(prod.insolubleFiber / 100.0, 2);
+        numerator += weights.calories       * residVar.calories       * (prod.calories       / 100.0);
+        denom    += weights.calories       * Math.pow(prod.calories       / 100.0, 2);
+        if (denom <= 0) return;
+        let contWeight = numerator / denom;
+        if (contWeight <= 0) return;
+        // Limit by remaining capacity
+        if (contWeight > remain) contWeight = remain;
+        // Round down to nearest step
+        let rounded = Math.floor(contWeight / prod.step) * prod.step;
+        // If contWeight is >= step but rounding yields 0, snap to one step
+        if (rounded < prod.step) {
+          // Only consider adding a single step if it fits within remain and improves error
+          rounded = prod.step;
+          if (rounded > remain) return;
+        }
+        // Compute new residual if this rounded weight is taken
+        const pf = rounded / 100.0;
+        const newResid = {
+          protein:        residVar.protein        - prod.protein        * pf,
+          saturatedFat:   residVar.saturatedFat   - prod.saturatedFat   * pf,
+          unsaturatedFat: residVar.unsaturatedFat - prod.unsaturatedFat * pf,
+          simpleCarbs:    residVar.simpleCarbs    - prod.simpleCarbs    * pf,
+          complexCarbs:   residVar.complexCarbs   - prod.complexCarbs   * pf,
+          solubleFiber:   residVar.solubleFiber   - prod.solubleFiber   * pf,
+          insolubleFiber: residVar.insolubleFiber - prod.insolubleFiber * pf,
+          calories:       residVar.calories       - prod.calories       * pf
+        };
+        // Clamp new residual to zero for error calculation
+        for (const k in newResid) {
+          if (newResid[k] < 0) newResid[k] = 0;
+        }
+        const newError = computeError(newResid);
+        const improvement = baselineErrorVar - newError;
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestIndex = i;
+          bestRounded = rounded;
+          bestNewResid = newResid;
+        }
+      });
+      if (bestIndex < 0 || bestImprovement <= improvementThresholdVar) {
+        break;
+      }
+      // Assign weight to best variable product
+      const p = products[bestIndex];
+      varAdd[bestIndex] += bestRounded;
+      remainingWeightVar[bestIndex] -= bestRounded;
+      // Update residual and baseline error
+      const pfBest = bestRounded / 100.0;
+      residVar.protein        -= p.protein        * pfBest;
+      residVar.saturatedFat   -= p.saturatedFat   * pfBest;
+      residVar.unsaturatedFat -= p.unsaturatedFat * pfBest;
+      residVar.simpleCarbs    -= p.simpleCarbs    * pfBest;
+      residVar.complexCarbs   -= p.complexCarbs   * pfBest;
+      residVar.solubleFiber   -= p.solubleFiber   * pfBest;
+      residVar.insolubleFiber -= p.insolubleFiber * pfBest;
+      residVar.calories       -= p.calories       * pfBest;
+      for (const k in residVar) {
+        if (residVar[k] < 0) residVar[k] = 0;
+      }
+      // Update totalsVarAdded for nutrient accounting
+      totalsVarAdded.protein        += p.protein        * pfBest;
+      totalsVarAdded.saturatedFat   += p.saturatedFat   * pfBest;
+      totalsVarAdded.unsaturatedFat += p.unsaturatedFat * pfBest;
+      totalsVarAdded.simpleCarbs    += p.simpleCarbs    * pfBest;
+      totalsVarAdded.complexCarbs   += p.complexCarbs   * pfBest;
+      totalsVarAdded.solubleFiber   += p.solubleFiber   * pfBest;
+      totalsVarAdded.insolubleFiber += p.insolubleFiber * pfBest;
+      totalsVarAdded.calories       += p.calories       * pfBest;
+      baselineErrorVar -= bestImprovement;
+    }
+    // Apply assigned variable weights: update grams inputs and totalsVarInit
+    variableIndices.forEach(i => {
+      if (varAdd[i] > 0) {
+        const gramsInput = document.getElementById(`g_${i}`);
+        const newVal = currentGrams[i] + varAdd[i];
+        gramsInput.value = newVal.toFixed(0);
+        currentGrams[i] = newVal;
+        const p = products[i];
+        const addedFactor = varAdd[i] / 100.0;
+        totalsVarInit.protein        += p.protein        * addedFactor;
+        totalsVarInit.saturatedFat   += p.saturatedFat   * addedFactor;
+        totalsVarInit.unsaturatedFat += p.unsaturatedFat * addedFactor;
+        totalsVarInit.simpleCarbs    += p.simpleCarbs    * addedFactor;
+        totalsVarInit.complexCarbs   += p.complexCarbs   * addedFactor;
+        totalsVarInit.solubleFiber   += p.solubleFiber   * addedFactor;
+        totalsVarInit.insolubleFiber += p.insolubleFiber * addedFactor;
+        totalsVarInit.calories       += p.calories       * addedFactor;
+      }
+    });
+
+    // Totals after variable assignment (selected pool)
+    const totalsSelectedAfterVar = {};
+    for (const k in totalsFixed) {
+      totalsSelectedAfterVar[k] = totalsFixed[k] + totalsVarInit[k];
+    }
+
+    // Compute residual for suggestions after assigning variable products
+    let residForSug = {};
+    for (const k in targets) {
+      residForSug[k] = Math.max(targets[k] - totalsSelectedAfterVar[k], 0);
+    }
+    let baselineErrorSug = computeError(residForSug);
+    // Prepare suggestion totals
+    const suggTotals = {
+      protein: 0, saturatedFat: 0, unsaturatedFat: 0, simpleCarbs: 0,
+      complexCarbs: 0, solubleFiber: 0, insolubleFiber: 0, calories: 0
+    };
+    // Prepare remainingWeight for suggestions: for each product, maxPortions*step - currentGrams
+    const remainingWeight = new Array(products.length).fill(0);
+    products.forEach((p, i) => {
+      const maxInput = document.getElementById(`max_${i}`);
+      const maxPortions = parseFloat(maxInput?.value) || 0;
+      const remain = maxPortions * p.step - currentGrams[i];
+      remainingWeight[i] = remain > 0 ? remain : 0;
+    });
+    // Greedy suggestions on unselected products (not in selectedIndices)
+    let suggestionsRaw = [];
+    // Greedy suggestions can iterate until no further improvement.  We
+    // cap iterations at a higher number to avoid endless loops.  If
+    // improvement falls below the threshold, the loop will break
+    // regardless of the iteration limit.  Increasing the cap allows
+    // more products to be recommended when needed.
+    const maxIter = 200;
+    let iter = 0;
+    const improvementThreshold = 1e-4;
+    while (iter < maxIter) {
+      iter++;
+      let bestIndex = -1;
+      let bestImprovement = 0;
+      let bestNewResid = null;
+      for (let i = 0; i < products.length; i++) {
+        // Consider only products with remaining capacity
+        if (remainingWeight[i] < products[i].step) continue;
+        const prod = products[i];
+        const portionFactor = prod.step / 100.0;
+        // Skip if any single nutrient per portion exceeds the residual requirement
+        if (prod.protein        * portionFactor > residForSug.protein)        continue;
+        if (prod.saturatedFat   * portionFactor > residForSug.saturatedFat)   continue;
+        if (prod.unsaturatedFat * portionFactor > residForSug.unsaturatedFat) continue;
+        if (prod.simpleCarbs    * portionFactor > residForSug.simpleCarbs)    continue;
+        if (prod.complexCarbs   * portionFactor > residForSug.complexCarbs)   continue;
+        if (prod.solubleFiber   * portionFactor > residForSug.solubleFiber)   continue;
+        if (prod.insolubleFiber * portionFactor > residForSug.insolubleFiber) continue;
+        if (prod.calories       * portionFactor > residForSug.calories)       continue;
+        // Also ensure that adding this portion will not cause the total intake
+        // (selected + variable + suggestions) to exceed the targets.  Compute
+        // current totals for pool + suggestions:
+        const currentTotalProtein        = totalsSelectedAfterVar.protein        + suggTotals.protein;
+        const currentTotalSaturatedFat   = totalsSelectedAfterVar.saturatedFat   + suggTotals.saturatedFat;
+        const currentTotalUnsaturatedFat = totalsSelectedAfterVar.unsaturatedFat + suggTotals.unsaturatedFat;
+        const currentTotalSimpleCarbs    = totalsSelectedAfterVar.simpleCarbs    + suggTotals.simpleCarbs;
+        const currentTotalComplexCarbs   = totalsSelectedAfterVar.complexCarbs   + suggTotals.complexCarbs;
+        const currentTotalSolubleFiber   = totalsSelectedAfterVar.solubleFiber   + suggTotals.solubleFiber;
+        const currentTotalInsolubleFiber = totalsSelectedAfterVar.insolubleFiber + suggTotals.insolubleFiber;
+        const currentTotalCalories       = totalsSelectedAfterVar.calories       + suggTotals.calories;
+        if (currentTotalProtein        + prod.protein        * portionFactor > targets.protein)        continue;
+        if (currentTotalSaturatedFat   + prod.saturatedFat   * portionFactor > targets.saturatedFat)   continue;
+        if (currentTotalUnsaturatedFat + prod.unsaturatedFat * portionFactor > targets.unsaturatedFat) continue;
+        if (currentTotalSimpleCarbs    + prod.simpleCarbs    * portionFactor > targets.simpleCarbs)    continue;
+        if (currentTotalComplexCarbs   + prod.complexCarbs   * portionFactor > targets.complexCarbs)   continue;
+        if (currentTotalSolubleFiber   + prod.solubleFiber   * portionFactor > targets.solubleFiber)   continue;
+        if (currentTotalInsolubleFiber + prod.insolubleFiber * portionFactor > targets.insolubleFiber) continue;
+        if (currentTotalCalories       + prod.calories       * portionFactor > targets.calories)       continue;
+        // Compute the new residual and improvement.  Note: residForSug contains
+        // the remaining requirement for each nutrient, so subtracting the
+        // contributions yields the new residual.
+        const newResid = {
+          protein:        residForSug.protein        - prod.protein        * portionFactor,
+          saturatedFat:   residForSug.saturatedFat   - prod.saturatedFat   * portionFactor,
+          unsaturatedFat: residForSug.unsaturatedFat - prod.unsaturatedFat * portionFactor,
+          simpleCarbs:    residForSug.simpleCarbs    - prod.simpleCarbs    * portionFactor,
+          complexCarbs:   residForSug.complexCarbs   - prod.complexCarbs   * portionFactor,
+          solubleFiber:   residForSug.solubleFiber   - prod.solubleFiber   * portionFactor,
+          insolubleFiber: residForSug.insolubleFiber - prod.insolubleFiber * portionFactor,
+          calories:       residForSug.calories       - prod.calories       * portionFactor
+        };
+        const newError = computeError(newResid);
+        const improvement = baselineErrorSug - newError;
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestIndex = i;
+          bestNewResid = newResid;
+        }
+      }
+      if (bestIndex < 0 || bestImprovement < improvementThreshold) {
+        break;
+      }
+      // Add suggestion portion
+      suggestionsRaw.push({index: bestIndex, grams: products[bestIndex].step});
+      const pf = products[bestIndex].step / 100.0;
+      suggTotals.protein        += products[bestIndex].protein        * pf;
+      suggTotals.saturatedFat   += products[bestIndex].saturatedFat   * pf;
+      suggTotals.unsaturatedFat += products[bestIndex].unsaturatedFat * pf;
+      suggTotals.simpleCarbs    += products[bestIndex].simpleCarbs    * pf;
+      suggTotals.complexCarbs   += products[bestIndex].complexCarbs   * pf;
+      suggTotals.solubleFiber   += products[bestIndex].solubleFiber   * pf;
+      suggTotals.insolubleFiber += products[bestIndex].insolubleFiber * pf;
+      suggTotals.calories       += products[bestIndex].calories       * pf;
+      remainingWeight[bestIndex] -= products[bestIndex].step;
+      residForSug = bestNewResid;
+      baselineErrorSug = baselineErrorSug - bestImprovement;
+    }
+    // Merge suggestions by product index
+    const suggMap = {};
+    suggestionsRaw.forEach(s => {
+      if (!suggMap[s.index]) suggMap[s.index] = 0;
+      suggMap[s.index] += s.grams;
+    });
+    const suggestionList = [];
+    for (const idxStr in suggMap) {
+      const idx = parseInt(idxStr);
+      suggestionList.push({index: idx, grams: suggMap[idx]});
+    }
+
+    // Update suggestions UI and compute errors and comparison table
+    const suggDiv = document.getElementById('suggestionsContainer');
+    let html = '';
+    html += '<h3>Рекомендации по закрытию хвостов:</h3>';
+    if (suggestionList.length === 0) {
+      html += '<p>Пул полностью покрывает цели, рекомендации не требуются.</p>';
+    } else {
+      html += '<ul>';
+      suggestionList.forEach(item => {
+        const prod = products[item.index];
+        html += `<li><span class="suggestion-item">${prod.name}</span>: ${item.grams.toFixed(0)} г (шаг ${prod.step.toFixed(0)} г)</li>`;
+      });
+      html += '</ul>';
+    }
+    // Compute totals with suggestions
+    const totalsWithSugg = {};
+    for (const k in totalsSelectedAfterVar) {
+      totalsWithSugg[k] = totalsSelectedAfterVar[k] + suggTotals[k];
+    }
+    // Build coverage data arrays
+    const poolData = [
+      totalsSelectedAfterVar.protein        / targets.protein,
+      totalsSelectedAfterVar.saturatedFat   / targets.saturatedFat,
+      totalsSelectedAfterVar.unsaturatedFat / targets.unsaturatedFat,
+      totalsSelectedAfterVar.simpleCarbs    / targets.simpleCarbs,
+      totalsSelectedAfterVar.complexCarbs   / targets.complexCarbs,
+      totalsSelectedAfterVar.solubleFiber   / targets.solubleFiber,
+      totalsSelectedAfterVar.insolubleFiber / targets.insolubleFiber,
+      totalsSelectedAfterVar.calories       / targets.calories
+    ];
+    const recData = [
+      totalsWithSugg.protein        / targets.protein,
+      totalsWithSugg.saturatedFat   / targets.saturatedFat,
+      totalsWithSugg.unsaturatedFat / targets.unsaturatedFat,
+      totalsWithSugg.simpleCarbs    / targets.simpleCarbs,
+      totalsWithSugg.complexCarbs   / targets.complexCarbs,
+      totalsWithSugg.solubleFiber   / targets.solubleFiber,
+      totalsWithSugg.insolubleFiber / targets.insolubleFiber,
+      totalsWithSugg.calories       / targets.calories
+    ];
+    // Cap values at 1.2 to keep chart readable
+    const cap = 1.2;
+    for (let i = 0; i < poolData.length; i++) {
+      if (poolData[i] > cap) poolData[i] = cap;
+      if (recData[i] > cap) recData[i] = cap;
+      poolData[i] = Math.max(0, poolData[i]);
+      recData[i] = Math.max(0, recData[i]);
+    }
+    // Compute residual errors and RMSE values
+    const residPool = {};
+    const residRec = {};
+    for (const k in targets) {
+      residPool[k] = Math.max(targets[k] - totalsSelectedAfterVar[k], 0);
+      residRec[k]  = Math.max(targets[k] - totalsWithSugg[k], 0);
+    }
+    const errPool = computeError(residPool);
+    const errRec  = computeError(residRec);
+    const nKeys = Object.keys(targets).length;
+    const rmsePool = Math.sqrt(errPool / nKeys);
+    const rmseRec  = Math.sqrt(errRec  / nKeys);
+    html += `<p><strong>Ошибка RMSE (пул):</strong> ${rmsePool.toFixed(3)}</p>`;
+    html += `<p><strong>Ошибка RMSE (пул + рекомендации):</strong> ${rmseRec.toFixed(3)}</p>`;
+    // Build comparison table of targets vs pool vs pool+rec
+    const labelMap = {
+      protein: 'Белки',
+      saturatedFat: 'Жиры насыщённые',
+      unsaturatedFat: 'Жиры ненасыщённые',
+      simpleCarbs: 'Углеводы простые',
+      complexCarbs: 'Углеводы сложные перевариваемые',
+      solubleFiber: 'Клетчатка растворимая',
+      insolubleFiber: 'Клетчатка нерастворимая',
+      calories: 'Калории'
+    };
+    html += '<table><thead><tr><th>Показатель</th><th>Цель</th><th>Пул</th><th>Пул + рек.</th></tr></thead><tbody>';
+    for (const k of Object.keys(labelMap)) {
+      const unit = (k === 'calories') ? '' : ' г';
+      html += `<tr><td>${labelMap[k]}</td><td>${targets[k].toFixed(k==='calories'?1:0)}${unit}</td><td>${totalsSelectedAfterVar[k].toFixed(k==='calories'?1:0)}${unit}</td><td>${totalsWithSugg[k].toFixed(k==='calories'?1:0)}${unit}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    suggDiv.innerHTML = html;
+  }
+
+  // Initial calculation to populate chart and suggestions
+  recalc();
+
+  // После начального расчёта также вычисляем оптимальный рацион
+  if (typeof computeOptimalDiet === 'function') {
+    computeOptimalDiet();
+  }
+
+</script>
+<!-- Slider logic from the standalone telegram_web_app_slider_20_30.html
+     embedded here.  This script calculates the basal metabolic rate
+     (ОСО) and macro targets based on user inputs in the calculator
+     section.  After updating the summary table it synchronises the
+     global targets (via updateTargetsFromSummary) and triggers
+     recalc() so that the product suggestions are updated in real
+     time. -->
+<script>
+  (function(){
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+
+    // === Таблицы как в оригинальном файле "Готовый калькулятор" ===
+    // Пол -> добавка в формуле ОСО
+    const SEX_ADD = {
+      "Мужской": 1,
+      "Женский": -161
+    };
+    // Активность -> множитель
+    const ACTIVITY = [
+      ["Минимальный (сидячий образ жизни)", 1.2],
+      ["Низкий (легкие тренировки 1–3 раза в неделю)", 1.375],
+      ["Умеренный (тренировки 3–5 раз в неделю)", 1.55],
+      ["Высокий (интенсивные тренировки 6–7 раз в неделю)", 1.725],
+      ["Экстремальный (профессиональные атлеты, тяжелый физический труд)", 1.9],
+    ];
+
+    // === Элементы ===
+    const elSex = document.getElementById('sex');
+    const elAct = document.getElementById('activity');
+    const elW   = document.getElementById('weight');
+    const elH   = document.getElementById('height');
+    const elA   = document.getElementById('age');
+    const elOSO = document.getElementById('osso');
+    const elOSOExplain = document.getElementById('ossoExplain');
+
+    const elpProt = document.getElementById('pProtein');
+    const elpSat  = document.getElementById('pFatSat');
+    const elpUns  = document.getElementById('pFatUnsat');
+    const elpSim  = document.getElementById('pCarbSimple');
+
+    const elvProt = document.getElementById('vProtein');
+    const elvSat  = document.getElementById('vFatSat');
+    const elvUns  = document.getElementById('vFatUnsat');
+    const elvSim  = document.getElementById('vCarbSimple');
+
+    const elFibTotal = document.getElementById('fiberTotal');
+    const elFibRatio = document.getElementById('fiberRatio');
+    const elvFibRatio= document.getElementById('vFiberRatio');
+
+    const elSummary = document.getElementById('summary');
+    const elSend    = document.getElementById('send');
+
+    // Заполнение активности
+    function fillActivity(){
+      elAct.innerHTML = "";
+      for(const [label] of ACTIVITY){
+        const opt = document.createElement('option');
+        opt.value = label;
+        opt.textContent = label;
+        elAct.appendChild(opt);
+      }
+      // default selection
+      elAct.value = "Низкий (легкие тренировки 1–3 раза в неделю)";
+    }
+
+    // Применение темы Telegram
+    function applyTheme(){
+      if(!tg) return;
+      const tp = tg.themeParams || {};
+      const set = (v, fallback) => (v ? v : fallback);
+      document.documentElement.style.setProperty('--bg', set(tp.bg_color, '#ffffff'));
+      document.documentElement.style.setProperty('--text', set(tp.text_color, '#222222'));
+      document.documentElement.style.setProperty('--subtle', set(tp.hint_color, '#6b7280'));
+      document.documentElement.style.setProperty('--btn', set(tp.button_color, '#0ea5e9'));
+      document.documentElement.style.setProperty('--btn-text', set(tp.button_text_color, '#ffffff'));
+      document.documentElement.style.setProperty('--card', set(tp.secondary_bg_color, '#f3f4f6'));
+      document.documentElement.style.setProperty('--border', set(tp.section_separator_color, '#e5e7eb'));
+    }
+
+    // Градиент заполнения для ползунков
+    function setGradient(range){
+      const min = parseFloat(range.min);
+      const max = parseFloat(range.max);
+      const v   = parseFloat(range.value);
+      const pct = ((v - min) / (max - min)) * 100;
+      if(range.classList.contains('slider')){
+        range.style.backgroundSize = pct + '% 100%';
+      }
+    }
+
+    // Формула ОСО
+    function calcOSO(weightKg, heightCm, ageY, sex, activityLabel){
+      const sexAdd = SEX_ADD[sex] ?? 0;
+      const actRow = ACTIVITY.find(([lbl]) => lbl === activityLabel);
+      const kAct   = actRow ? actRow[1] : 1;
+      const base   = (10*weightKg) + (6.25*heightCm) - (5*ageY) + sexAdd;
+      return base * kAct;
+    }
+
+    function roundInt(x){ return Math.round(x); }
+    function clamp(x, lo, hi){ return Math.min(hi, Math.max(lo, x)); }
+    function num(el, fallback){
+      const v = parseFloat((el.value || '').toString().replace(',', '.'));
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    // Обновление процентов и клетчатки
+    function syncUIBits(){
+      elvProt.textContent = elpProt.value + '%';
+      elvSat.textContent  = elpSat.value + '%';
+      elvUns.textContent  = elpUns.value + '%';
+      elvSim.textContent  = elpSim.value + '%';
+      elvFibRatio.textContent = '1 : ' + parseFloat(elFibRatio.value).toFixed(1);
+      [elpProt, elpSat, elpUns, elpSim, elFibRatio].forEach(setGradient);
+    }
+
+    function updateAll(){
+      syncUIBits();
+      const sex = elSex.value;
+      const act = elAct.value;
+      const w = clamp(num(elW, 0), 0, 999);
+      const h = clamp(num(elH, 0), 0, 999);
+      const a = clamp(num(elA, 0), 0, 150);
+      // ОСО
+      const oso = calcOSO(w, h, a, sex, act);
+      currentOSO = oso;
+      elOSO.textContent = (Math.round(oso*10)/10).toFixed(1) + ' ккал';
+      elOSOExplain.textContent = `((10×${w}) + (6.25×${h}) − (5×${a}) + ${SEX_ADD[sex]}) × ${ACTIVITY.find(([lbl])=>lbl===act)?.[1]}`;
+      // Целевой калораж
+      const K = oso;
+      // Чтение процентов (доли)
+      const pProt = parseInt(elpProt.value, 10) / 100;
+      const pSat  = parseInt(elpSat.value, 10)  / 100;
+      const pUns  = parseInt(elpUns.value, 10)  / 100;
+      const pSim  = parseInt(elpSim.value, 10)  / 100;
+      // Граммы по округлению
+      const gProt = roundInt((K * pProt) / 4);
+      const gSat  = roundInt((K * pSat ) / 9);
+      const gUns  = roundInt((K * pUns ) / 9);
+      const gSim  = roundInt((K * pSim ) / 4);
+      // Клетчатка
+      const fibTotal = clamp(Math.round(num(elFibTotal, 0)), 0, 999);
+      const r = parseFloat(elFibRatio.value);
+      const gFibSol = roundInt(fibTotal / (1 + r));
+      const gFibIns = roundInt(fibTotal - gFibSol);
+      // Потраченная энергия на компоненты
+      const kcalUsed = (gProt*4) + (gSat*9) + (gUns*9) + (gSim*4) + ((gFibSol + gFibIns) * 1.5);
+      // Остаток на сложные углеводы
+      let gComplex = roundInt((K - kcalUsed) / 4);
+      if(gComplex < 0) gComplex = 0;
+      // Итоговая энергия
+      const kcalFinal = (gProt*4) + (gSat*9) + (gUns*9) + (gSim*4) + (gComplex*4) + ((gFibSol + gFibIns) * 1.5);
+      const kcalFinal10 = Math.round(kcalFinal*10)/10;
+      // Таблица
+      const rows = [
+        ['Белки', gProt + ' г'],
+        ['Жиры насыщенные', gSat + ' г'],
+        ['Жиры ненасыщенные', gUns + ' г'],
+        ['Углеводы простые', gSim + ' г'],
+        ['Углеводы сложные перевариваемые', gComplex + ' г'],
+        ['Клетчатка растворимая', gFibSol + ' г'],
+        ['Клетчатка нерастворимая', gFibIns + ' г'],
+        ['ККал', kcalFinal10.toFixed(1)]
+      ];
+      elSummary.innerHTML = rows.map(([k,v]) => `<tr><td>${k}</td><td class="right">${v}</td></tr>`).join('');
+      // Синхронизация глобальных целей и обновление рекомендаций
+      if (typeof updateTargetsFromSummary === 'function') {
+        updateTargetsFromSummary();
+      }
+      if (typeof recalc === 'function') {
+        recalc();
+      }
+      // После пересчёта рекомендаций пересчитываем также оптимальный рацион
+      if (typeof computeOptimalDiet === 'function') {
+        computeOptimalDiet();
+      }
+      if(tg){
+        tg.MainButton.setText('Отправить расчёты');
+      }
+    }
+
+    function send(){
+      // Собрать данные
+      const data = {
+        sex: elSex.value,
+        activity: elAct.value,
+        weight: parseFloat(elW.value),
+        height: parseFloat(elH.value),
+        age: parseInt(elA.value, 10),
+        oso_kcal: parseFloat((elOSO.textContent||'0').replace(/[^\d.]/g,'')),
+        summary: Array.from(document.querySelectorAll('#summary tr')).map(tr => {
+          const tds = tr.querySelectorAll('td');
+          return {name: tds[0].textContent, value: tds[1].textContent};
+        })
+      };
+      // Отправка в бота при наличии Telegram.WebApp
+      if(tg){
+        tg.sendData(JSON.stringify({type:'nutrition_calc', payload:data, ts:Date.now()}));
+        tg.close();
+      } else {
+        // В обычном браузере просто обновляем цели и пересчитываем
+        if (typeof updateTargetsFromSummary === 'function') {
+          updateTargetsFromSummary();
+        }
+        if (typeof recalc === 'function') {
+          recalc();
+        }
+        // Пересчитываем оптимальный рацион в обычном браузере
+        if (typeof computeOptimalDiet === 'function') {
+          computeOptimalDiet();
+        }
+      }
+    }
+
+    function init(){
+      applyTheme();
+      fillActivity();
+      // Слушатели
+      [elSex, elAct, elW, elH, elA,
+       elpProt, elpSat, elpUns, elpSim,
+       elFibTotal, elFibRatio].forEach(el => {
+        el.addEventListener('input', updateAll);
+      });
+      // Кнопка отправки
+      elSend.addEventListener('click', send);
+      // Инициализация
+      [elpProt, elpSat, elpUns, elpSim, elFibRatio].forEach(setGradient);
+      updateAll();
+      if(tg){
+        tg.ready();
+        tg.expand();
+        tg.onEvent('themeChanged', applyTheme);
+        tg.MainButton.show();
+        tg.MainButton.onClick(send);
+        tg.BackButton.show();
+        tg.BackButton.onClick(() => tg.close());
+      }
+    }
+    // Вызов инициализации при загрузке
+    if(document.readyState === 'complete' || document.readyState === 'interactive'){
+      // Если DOM уже готов, запускаем сразу
+      init();
+    } else {
+      document.addEventListener('DOMContentLoaded', init);
+    }
+  })();
+</script>
+</body>
+</html>

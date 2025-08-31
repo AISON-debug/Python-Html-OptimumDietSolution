@@ -520,7 +520,8 @@
       dietInput.addEventListener('blur', adjustToStep);
       // Событие change — значение изменилось (в том числе через стрелочки)
       dietInput.addEventListener('change', adjustToStep);
-      // На событие input пересчёт не выполняем, чтобы не мешать вводу
+      // Событие input — пересчёт в реальном времени при вводе веса
+      dietInput.addEventListener('input', adjustToStep);
     }
   });
 
@@ -809,8 +810,13 @@ async function computeOptimalDiet() {
   const steps = [];
   const maxPortions = [];
   const fixed = {};
-  const selected = [];
+  // Map from optimizer index -> original product index
+  const indexMap = [];
   products.forEach((p, idx) => {
+    const selCb = document.getElementById('sel_' + idx);
+    if (!selCb || !selCb.checked) {
+      return;
+    }
     nutrientMatrix.push([
       p.protein,
       p.saturatedFat,
@@ -824,15 +830,19 @@ async function computeOptimalDiet() {
     steps.push(p.step);
     maxPortions.push(p.maxPortions);
     const dietInput = document.getElementById('diet_' + idx);
-    const selCb = document.getElementById('sel_' + idx);
     const fixCb = document.getElementById('fix_' + idx);
-    if (selCb && selCb.checked) {
-      selected.push(idx);
-      if (fixCb && fixCb.checked && dietInput) {
-        fixed[idx] = parseFloat(dietInput.value) || 0;
-      }
+    const optIdx = indexMap.length;
+    if (fixCb && fixCb.checked && dietInput) {
+      fixed[optIdx] = parseFloat(dietInput.value) || 0;
     }
+    indexMap.push(idx);
   });
+
+  const resDiv = document.getElementById('optimizationResult');
+  if (nutrientMatrix.length === 0) {
+    resDiv.textContent = 'Выберите хотя бы один продукт.';
+    return;
+  }
 
   const weightsArr = [
     weights.protein,
@@ -869,13 +879,13 @@ async function computeOptimalDiet() {
   });
 
   const data = await response.json();
-  const resDiv = document.getElementById('optimizationResult');
   if (data.error) {
     resDiv.textContent = 'Ошибка: ' + data.error;
     return;
   }
   const items = Object.entries(data.varAdd || {}).map(([i, grams]) => {
-    const name = products[i] ? products[i].name : i;
+    const origIdx = indexMap[parseInt(i, 10)];
+    const name = products[origIdx] ? products[origIdx].name : origIdx;
     return `${name}: ${parseFloat(grams).toFixed(2)} г`;
   });
   resDiv.innerHTML =
