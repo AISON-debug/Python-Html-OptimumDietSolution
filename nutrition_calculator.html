@@ -762,6 +762,7 @@
        elpProt, elpSat, elpUns, elpSim,
        elFibTotal, elFibRatio].forEach(el => {
         el.addEventListener('input', updateAll);
+        el.addEventListener('change', updateAll);
       });
       // Кнопка отправки
       elSend.addEventListener('click', send);
@@ -839,21 +840,32 @@ async function computeOptimalDiet() {
     targets.calories,
   ];
 
-  const response = await fetch('/optimize', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      nutrient_matrix: nutrientMatrix,
-      steps: steps,
-      max_portions: maxPortions,
-      weights: weightsArr,
-      targets: targetsArr,
-      fixed_indices: fixed,
-    }),
-  });
-
-  const data = await response.json();
   const resDiv = document.getElementById('optimizationResult');
+  let data;
+  try {
+    const response = await fetch('/optimize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nutrient_matrix: nutrientMatrix,
+        steps: steps,
+        max_portions: maxPortions,
+        weights: weightsArr,
+        targets: targetsArr,
+        fixed_indices: fixed,
+      }),
+    });
+    data = await response.json();
+  } catch (error) {
+    console.error('Ошибка при получении данных для оптимизации:', error);
+    resDiv.innerHTML = '<p><strong>Не удалось получить данные для оптимизации.</strong></p>';
+    return;
+  }
+
+  if (!data) {
+    resDiv.innerHTML = '<p><strong>Не удалось получить данные для оптимизации.</strong></p>';
+    return;
+  }
   if (data.error) {
     resDiv.textContent = 'Ошибка: ' + data.error;
     return;
