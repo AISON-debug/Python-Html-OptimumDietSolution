@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Telegram Nutrition WebApp</title>
+  <!--
+    This WebApp allows users to pick a pool of products from a built‑in
+    database (products_db.csv embedded below), set gram amounts for
+    those products and optionally fix the amounts.  The remaining
+    nutrients ("tail") are filled in real time by suggesting additional
+    products from the database.  Suggestions respect each product's
+    step size (portion size) and attempt to minimize the weighted
+    squared error between the target and achieved nutrient totals.
+    A radar chart visualises the coverage of the nutrient goals for
+    both the chosen pool and the pool plus suggestions.
+  -->
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-bottom: 1em;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px;
+      text-align: center;
+    }
+    th {
+      background: #f0f0f0;
+    }
+    input[type="number"] {
+      width: 70px;
+    }
+
+    /* Additional styles copied from the Telegram nutrition calculator so the embedded
+       calculator looks consistent.  Variables and classes are defined here
+       to scope the theme for the calculator. */
+    :root {
+      --bg: #ffffff;
+      --text: #222222;
+      --subtle: #6b7280;
+      --btn: #0ea5e9;
+      --btn-text: #ffffff;
+      --card: #f3f4f6;
+      --border: #e5e7eb;
+    }
+    .tg-theme {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .card {
+      width: min(680px, 96vw);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 6px 28px rgba(0,0,0,.08);
+      padding: 18px 16px 18px;
+    }
+    .muted { margin: 0 0 10px 0; color: var(--subtle); font-size: 13px; }
+    .grid { display: grid; gap: 12px; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .field {
+      display: grid; gap: 6px;
+      background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+    }
+    .field label { font-size: 13px; color: var(--subtle); }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .slider {
+      -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+      background: linear-gradient(90deg, var(--btn), var(--btn));
+      background-size: 50% 100%; background-repeat: no-repeat; background-color: #e5e7eb; border-radius: 999px;
+      outline: none;
+    }
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--btn);
+      border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    }
+    .slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--btn); border: 2px solid #fff; }
+    .value {
+      min-width: 86px; text-align: right; font-weight: 700; font-size: 18px;
+      padding: 6px 10px; background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    }
+    .osso-box {
+      display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+      background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+    }
+    .osso-title { font-size: 14px; color: var(--subtle); margin: 0; }
+    .osso-value { font-weight: 800; font-size: 22px; }
+    /* style for summary table inside calculator */
+    #calculatorContainer table {
+      width: 100%; border-collapse: collapse; margin-top: 8px; background: #fff; border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    }
+    #calculatorContainer th, #calculatorContainer td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #calculatorContainer th { text-align: left; color: var(--subtle); font-weight: 600; }
+    #calculatorContainer tr:last-child td { border-bottom: none; }
+    #calculatorContainer .buttons { display: flex; gap: 8px; margin-top: 14px; }
+    #calculatorContainer button.subtle {
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+      padding: 10px 12px; border-radius: 10px; font-size: 14px;
+    }
+    /* Подсветка строки выбранного продукта — нежно‑зелёный фон */
+    .selected-row {
+      background: #e0ffe0;
+    }
+    /* Подсветка ячейки веса фиксированного продукта — светло‑красный фон */
+    .fixed-weight {
+      background: #ffb3b3;
+    }
+    .suggestion-item {
+      color: #008000; /* green */
+    }
+    #suggestionsContainer {
+      margin-top: 20px;
+    }
+    #productTable.collapsed .nutrient-col {
+      display: none;
+    }
+    /* Стили для радарной диаграммы удалены */
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.35.2"></script>
+</head>
+<body>
+  <!-- Калькулятор питательных показателей (вставка из telegram_web_app_slider_20_30.html) -->
+  <div id="calculatorContainer" class="tg-theme">
+    <div class="card">
+      <h1>Питательный калькулятор</h1>
+      <p class="muted">Одна страница. ОСО пересчитывается в реальном времени. Итоги — снизу.</p>
+
+      <!-- Блок ОСО -->
+      <section class="grid cols-2" style="margin-top: 6px;">
+        <div class="field">
+          <label for="sex">Пол</label>
+          <select id="sex">
+            <option value="Мужской">Мужской</option>
+            <option value="Женский">Женский</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="activity">Уровень активности</label>
+          <select id="activity"></select>
+        </div>
+
+        <div class="field">
+          <label for="weight">Вес (кг)</label>
+          <input id="weight" type="number" inputmode="decimal" min="20" max="300" step="0.1" value="67">
+        </div>
+        <div class="field">
+          <label for="height">Рост (см)</label>
+          <input id="height" type="number" inputmode="decimal" min="100" max="250" step="0.5" value="185">
+        </div>
+        <div class="field">
+          <label for="age">Возраст</label>
+          <input id="age" type="number" inputmode="numeric" min="10" max="100" step="1" value="26">
+        </div>
+        <div class="osso-box">
+          <div>
+            <p class="osso-title">Основной суточный обмен (ОСО)</p>
+            <div id="ossoExplain" class="muted" style="font-size:12px;"></div>
+          </div>
+          <div id="osso" class="osso-value">0.0 ккал</div>
+        </div>
+      </section>
+
+      <!-- Ползунки нутриентов -->
+      <section class="grid" style="margin-top: 14px;">
+        <div class="row">
+          <div class="field">
+            <label>Белки (% от калоража: 20–35)</label>
+            <input id="pProtein" class="slider" type="range" min="20" max="35" step="1" value="25">
+          </div>
+          <div id="vProtein" class="value">25%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Жиры насыщённые (%: 5–10)</label>
+            <input id="pFatSat" class="slider" type="range" min="5" max="10" step="1" value="8">
+          </div>
+          <div id="vFatSat" class="value">8%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Жиры ненасыщённые (%: 12–25)</label>
+            <input id="pFatUnsat" class="slider" type="range" min="12" max="25" step="1" value="18">
+          </div>
+          <div id="vFatUnsat" class="value">18%</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Углеводы простые (%: 5–10)</label>
+            <input id="pCarbSimple" class="slider" type="range" min="5" max="10" step="1" value="7">
+          </div>
+          <div id="vCarbSimple" class="value">7%</div>
+        </div>
+      </section>
+
+      <!-- Клетчатка -->
+      <section class="grid cols-2" style="margin-top: 14px;">
+        <div class="field">
+          <label for="fiberTotal">Общая клетчатка (г)</label>
+          <input id="fiberTotal" type="number" inputmode="numeric" min="0" max="200" step="1" value="25">
+        </div>
+        <div class="field">
+          <label for="fiberRatio">Соотношение клетчатки (Растворимая : Нерастворимая)</label>
+          <div class="row">
+            <input id="fiberRatio" class="slider" type="range" min="2.0" max="3.0" step="0.1" value="2.5">
+            <div id="vFiberRatio" class="value">1 : 2.5</div>
+          </div>
+          <div class="muted">Растворимая — всегда 1; Нерастворимая — ползунок.</div>
+        </div>
+      </section>
+
+      <!-- Итоговая таблица -->
+      <section style="margin-top: 12px;">
+        <table>
+          <thead>
+            <tr><th>Показатель</th><th class="right">Значение</th></tr>
+          </thead>
+          <tbody id="summary">
+            <!-- динамически будет заполнено -->
+          </tbody>
+        </table>
+
+<!-- Контейнер для результатов оптимизации -->
+<div id="optimalDietContainer" style="margin-top: 20px;"></div>
+<!-- Контейнер для радарной диаграммы удалён по требованию пользователя -->
+        <div class="buttons">
+          <button id="send" class="subtle">Отправить в бота</button>
+        </div>
+      </section>
+    </div>
+  </div>
+<!-- Раздел базы данных продуктов -->
+<!-- Заголовок раздела "База данных продуктов" убран по требованию пользователя -->
+<!-- Описание убрано по просьбе пользователя -->
+
+<label style="display:block;margin:8px 0;">Доля остатка min: <input type="number" id="minTailPercent" value="1" min="1" max="100" style="width:80px;"></label>
+<label style="display:block;margin:8px 0;">Количество прогонов: <input type="number" id="runCount" value="100" min="1" style="width:80px;"></label>
+<label style="display:block;margin:8px 0;"><input type="checkbox" id="collapseColumns"> Свернуть таблицу</label>
+<div id="optimizationResult"></div>
+<table id="productTable">
+  <thead>
+    <tr>
+      <th>Пул</th>
+      <th>Продукт</th>
+      <th class="nutrient-col">Белки/100г</th>
+      <th class="nutrient-col">Нас. жиры/100г</th>
+      <th class="nutrient-col">Ненас. жиры/100г</th>
+      <th class="nutrient-col">Простые угл./100г</th>
+      <th class="nutrient-col">Сложные угл./100г</th>
+      <th class="nutrient-col">Клетч. раствор./100г</th>
+      <th class="nutrient-col">Клетч. нераств./100г</th>
+      <th class="nutrient-col">Ккал/100г</th>
+      <th>Шаг, г</th>
+      <th>Макс. порций</th>
+      <th>Вес max, г</th>
+      <th>Вес в рационе, г</th>
+      <th>Фиксировать</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<!-- Убраны контейнеры предложений и графика -->
+
+<script>
+  // Embedded database converted from products_db.csv.  Each product has
+  // nutrient values per 100 g, a step (portion size) in grams and a
+  // maximum number of portions (not used in this demo but included for
+  // completeness).
+  const products = [
+    {name: "Банан", step: 10.00, protein: 1.20, saturatedFat: 0.10, unsaturatedFat: 0.10, simpleCarbs: 15.00, complexCarbs: 8.00, solubleFiber: 1.30, insolubleFiber: 1.80, calories: 103.25, maxPortions: 10.00},
+    {name: "Грецкий оерх", step: 1.00, protein: 15.20, saturatedFat: 6.10, unsaturatedFat: 57.10, simpleCarbs: 2.60, complexCarbs: 7.00, solubleFiber: 2.00, insolubleFiber: 4.00, calories: 677.00, maxPortions: 15.00},
+    {name: "Гречка", step: 10.00, protein: 13.20, saturatedFat: 0.70, unsaturatedFat: 2.00, simpleCarbs: 1.40, complexCarbs: 62.00, solubleFiber: 1.10, insolubleFiber: 5.90, calories: 341.20, maxPortions: 12.00},
+    {name: "Картофель сырой", step: 25.00, protein: 2.00, saturatedFat: 0.00, unsaturatedFat: 0.10, simpleCarbs: 1.20, complexCarbs: 17.00, solubleFiber: 0.50, insolubleFiber: 1.50, calories: 84.70, maxPortions: 10.00},
+    {name: "Макароны", step: 10.00, protein: 12.50, saturatedFat: 0.30, unsaturatedFat: 0.80, simpleCarbs: 1.10, complexCarbs: 70.50, solubleFiber: 1.20, insolubleFiber: 2.50, calories: 351.85, maxPortions: 20.00},
+    {name: "Масло оливковое", step: 1.00, protein: 0.00, saturatedFat: 14.00, unsaturatedFat: 86.00, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 900.00, maxPortions: 10.00},
+    {name: "Масло подсолнечное", step: 1.00, protein: 0.00, saturatedFat: 11.00, unsaturatedFat: 84.50, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 859.50, maxPortions: 10.00},
+    {name: "Маш", step: 5.00, protein: 23.00, saturatedFat: 0.30, unsaturatedFat: 1.50, simpleCarbs: 3.00, complexCarbs: 59.00, solubleFiber: 1.50, insolubleFiber: 6.50, calories: 368.20, maxPortions: 10.00},
+    {name: "Миндаль", step: 1.00, protein: 21.20, saturatedFat: 3.70, unsaturatedFat: 44.50, simpleCarbs: 4.40, complexCarbs: 9.50, solubleFiber: 3.30, insolubleFiber: 8.60, calories: 592.05, maxPortions: 30.00},
+    {name: "Молоко", step: 450.00, protein: 3.00, saturatedFat: 1.90, unsaturatedFat: 1.30, simpleCarbs: 4.80, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 60.00, maxPortions: 1.00},
+    {name: "Отруби пшеничные", step: 1.00, protein: 15.00, saturatedFat: 2.20, unsaturatedFat: 0.70, simpleCarbs: 2.00, complexCarbs: 4.00, solubleFiber: 8.00, insolubleFiber: 32.00, calories: 170.10, maxPortions: 10.00},
+    {name: "Протеин", step: 1.00, protein: 79.50, saturatedFat: 3.30, unsaturatedFat: 0.00, simpleCarbs: 0.00, complexCarbs: 15.00, solubleFiber: 0.00, insolubleFiber: 2.10, calories: 410.85, maxPortions: 30.00},
+    {name: "Рис*", step: 80.00, protein: 7.50, saturatedFat: 0.10, unsaturatedFat: 0.10, simpleCarbs: 0.30, complexCarbs: 75.70, solubleFiber: 0.20, insolubleFiber: 0.80, calories: 337.30, maxPortions: 1.00},
+    {name: "Семена чиа", step: 1.00, protein: 16.00, saturatedFat: 3.70, unsaturatedFat: 26.70, simpleCarbs: 1.00, complexCarbs: 6.00, solubleFiber: 6.00, insolubleFiber: 31.00, calories: 421.10, maxPortions: 10.00},
+    {name: "Семечки подсолнечника*", step: 1.00, protein: 21.00, saturatedFat: 5.00, unsaturatedFat: 48.00, simpleCarbs: 1.00, complexCarbs: 2.00, solubleFiber: 1.50, insolubleFiber: 4.50, calories: 582.00, maxPortions: 30.00},
+    {name: "Тилапия", step: 120.00, protein: 20.10, saturatedFat: 0.80, unsaturatedFat: 1.70, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 102.90, maxPortions: 1.00},
+    {name: "Филе куриное", step: 250.00, protein: 23.60, saturatedFat: 0.50, unsaturatedFat: 1.20, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 109.70, maxPortions: 1.00},
+    {name: "Филе пангасиуса*", step: 200.00, protein: 15.00, saturatedFat: 1.00, unsaturatedFat: 2.00, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 87.00, maxPortions: 1.00},
+    {name: "Хлопья овсяные", step: 2.00, protein: 14.00, saturatedFat: 1.20, unsaturatedFat: 4.80, simpleCarbs: 1.50, complexCarbs: 55.00, solubleFiber: 4.50, insolubleFiber: 6.50, calories: 352.50, maxPortions: 30.00},
+    {name: "Чечевица (крупа)*", step: 5.00, protein: 22.00, saturatedFat: 0.50, unsaturatedFat: 3.50, simpleCarbs: 2.00, complexCarbs: 60.00, solubleFiber: 2.50, insolubleFiber: 8.50, calories: 388.50, maxPortions: 10.00},
+    {name: "Яйцо куриное", step: 70.00, protein: 12.60, saturatedFat: 3.10, unsaturatedFat: 8.00, simpleCarbs: 0.60, complexCarbs: 0.60, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 155.10, maxPortions: 2.00},
+    {name: "Филе бедра без кожи куриное", step: 10.00, protein: 20.00, saturatedFat: 1.20, unsaturatedFat: 2.80, simpleCarbs: 0.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 116.00, maxPortions: 25.00},
+    {name: "Морковь", step: 10.00, protein: 0.90, saturatedFat: 0.03, unsaturatedFat: 0.19, simpleCarbs: 4.70, complexCarbs: 4.10, solubleFiber: 1.40, insolubleFiber: 2.40, calories: 46.48, maxPortions: 10.00},
+    {name: "Кальмар сушеный", step: 5.00, protein: 62.00, saturatedFat: 0.80, unsaturatedFat: 2.20, simpleCarbs: 0.00, complexCarbs: 5.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 295.00, maxPortions: 6.00},
+    {name: "Фисташки в скорлупе", step: 5.00, protein: 12.40, saturatedFat: 3.40, unsaturatedFat: 23.50, simpleCarbs: 4.70, complexCarbs: 9.80, solubleFiber: 1.30, insolubleFiber: 4.00, calories: 357.65, maxPortions: 6.00},
+    {name: "Пиво Bud Zero", step: 450.00, protein: 0.40, saturatedFat: 0.00, unsaturatedFat: 0.00, simpleCarbs: 2.80, complexCarbs: 3.20, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 25.60, maxPortions: 1.00},
+    {name: "Финики с косточкой", step: 5.00, protein: 1.60, saturatedFat: 0.03, unsaturatedFat: 0.04, simpleCarbs: 54.90, complexCarbs: 6.80, solubleFiber: 2.70, insolubleFiber: 3.80, calories: 263.58, maxPortions: 5.00},
+    {name: "Семена льна", step: 1.00, protein: 18.30, saturatedFat: 3.70, unsaturatedFat: 35.90, simpleCarbs: 1.60, complexCarbs: 1.80, solubleFiber: 3.30, insolubleFiber: 24.50, calories: 484.90, maxPortions: 15.00},
+    {name: "Груша вяленая", step: 25.00, protein: 1.50, saturatedFat: 0.10, unsaturatedFat: 0.30, simpleCarbs: 42.00, complexCarbs: 12.80, solubleFiber: 3.80, insolubleFiber: 6.20, calories: 243.80, maxPortions: 1.00},
+    {name: "Сахар", step: 5.00, protein: 0.00, saturatedFat: 0.00, unsaturatedFat: 0.00, simpleCarbs: 100.00, complexCarbs: 0.00, solubleFiber: 0.00, insolubleFiber: 0.00, calories: 0.00, maxPortions: 2.00}
+  ];
+
+  // Nutrient targets.  These can be adjusted to suit the user; they are
+  // initialised here based on the example given by the user.  Calories
+  // are derived from the macro formula: 4*protein + 9*(sat+unsat) +
+  // 4*(simple+complex) + 1.5*(soluble+insoluble).
+  const targets = {
+    protein: 140,
+    saturatedFat: 18,
+    unsaturatedFat: 60,
+    simpleCarbs: 29,
+    complexCarbs: 226,
+    solubleFiber: 10,
+    insolubleFiber: 25,
+    calories: 0
+  };
+  // compute calories from macro targets
+  targets.calories = 4 * targets.protein + 9 * (targets.saturatedFat + targets.unsaturatedFat) + 4 * (targets.simpleCarbs + targets.complexCarbs) + 1.5 * (targets.solubleFiber + targets.insolubleFiber);
+
+  // Weights for error calculation (higher weight means the nutrient is
+  // prioritised more in the optimisation).  These can be tuned.
+  const weights = {
+    protein: 2,
+    saturatedFat: 1,
+    unsaturatedFat: 1,
+    simpleCarbs: 1,
+    complexCarbs: 1,
+    solubleFiber: 1,
+    insolubleFiber: 1,
+    calories: 3
+  };
+    // Fraction of the residual used in each round of the iterative optimisation.  This
+    // value is controlled by a slider (1–100) below the comparison table.  A value
+    // of 50 means half of the remaining residual is targeted in each iteration.
+    let residualFraction = 0.5;
+    // Latest ОСО value; used to determine the lower bound of residual fraction search
+    let currentOSO = 0;
+
+
+  // Build the product selection table dynamically.
+  const tbody = document.querySelector('#productTable tbody');
+  // Создаём строки таблицы с интерактивными элементами: выбор, шаг, макс порций, вес и фиксацию.
+  products.forEach((p, idx) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="checkbox" id="sel_${idx}"></td>
+      <td>${p.name}</td>
+      <td class="nutrient-col">${p.protein.toFixed(2)}</td>
+      <td class="nutrient-col">${p.saturatedFat.toFixed(2)}</td>
+      <td class="nutrient-col">${p.unsaturatedFat.toFixed(2)}</td>
+      <td class="nutrient-col">${p.simpleCarbs.toFixed(2)}</td>
+      <td class="nutrient-col">${p.complexCarbs.toFixed(2)}</td>
+      <td class="nutrient-col">${p.solubleFiber.toFixed(2)}</td>
+      <td class="nutrient-col">${p.insolubleFiber.toFixed(2)}</td>
+      <td class="nutrient-col">${p.calories.toFixed(2)}</td>
+      <td><input type="number" id="step_${idx}" value="${p.step.toFixed(2)}" min="0" step="0.01"></td>
+      <td><input type="number" id="max_${idx}" value="${p.maxPortions.toFixed(2)}" min="0" step="1"></td>
+      <td id="weight_${idx}">${(p.step * p.maxPortions).toFixed(2)}</td>
+      <td><input type="number" id="diet_${idx}" value="${(p.step * p.maxPortions).toFixed(2)}" min="0" step="${p.step.toFixed(2)}" max="${(p.step * p.maxPortions).toFixed(2)}" disabled></td>
+      <td><input type="checkbox" id="fix_${idx}"></td>
+    `;
+    tbody.appendChild(tr);
+    // Получаем ссылки на элементы ввода и ячейку веса
+    const stepInput  = tr.querySelector('#step_' + idx);
+    const maxInput   = tr.querySelector('#max_' + idx);
+    const weightCell = tr.querySelector('#weight_' + idx);
+    const dietInput  = tr.querySelector('#diet_' + idx);
+    const fixCb      = tr.querySelector('#fix_' + idx);
+    const selCb      = tr.querySelector('#sel_' + idx);
+    // Функция обновления максимального веса и атрибутов dietInput
+    function updateWeight() {
+      const stepVal = parseFloat(stepInput.value) || 0;
+      const maxVal  = parseFloat(maxInput.value) || 0;
+      const maxWeight = stepVal * maxVal;
+      weightCell.textContent = maxWeight.toFixed(2);
+      // Обновляем ограничения и шаг для веса в рационе
+      if (dietInput) {
+        // Обновляем максимальный вес и шаг для поля ввода
+        dietInput.setAttribute('max', maxWeight.toFixed(2));
+        dietInput.setAttribute('step', stepVal.toFixed(2));
+        if (!fixCb.checked) {
+          // Если продукт не зафиксирован, отображаем максимальный вес
+          dietInput.value = maxWeight.toFixed(2);
+        } else {
+          // Если продукт зафиксирован, корректируем введённый вес
+          let val = parseFloat(dietInput.value);
+          if (isNaN(val) || val < 0) {
+            val = 0;
+          }
+          // Ограничиваем сверху максимальным весом
+        if (val > maxWeight) {
+            val = maxWeight;
+        }
+        // Округление к ближайшему кратному шага (если шаг > 0)
+        if (stepVal > 0) {
+          // Сначала округляем до ближайшего значения шага
+          let rounded = Math.round(val / stepVal) * stepVal;
+          // Если округление превысило максимум, корректируем вниз
+          if (rounded > maxWeight) {
+            rounded = Math.floor(maxWeight / stepVal) * stepVal;
+          }
+          // Если округление привело к отрицательному, корректируем вверх
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          val = rounded;
+        } else {
+          // если шаг нулевой или некорректный, просто ограничиваем
+          if (val < 0) val = 0;
+        }
+        dietInput.value = val.toFixed(2);
+        }
+      }
+    }
+    // Обработчики изменений для шага и максимума порций
+    stepInput.addEventListener('input', () => {
+      p.step = parseFloat(stepInput.value) || 0;
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении шага
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    maxInput.addEventListener('input', () => {
+      p.maxPortions = parseFloat(maxInput.value) || 0;
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении максимального числа порций
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    // Подсветка строки при выборе продукта
+    selCb.addEventListener('change', () => {
+      if (selCb.checked) {
+        tr.classList.add('selected-row');
+      } else {
+        tr.classList.remove('selected-row');
+      }
+      // Пересчитать оптимальный рацион при изменении выбора
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+    // Подсветка ячейки веса при фиксации
+    fixCb.addEventListener('change', () => {
+      if (fixCb.checked) {
+        // Разрешить ввод веса в рационе и подсветить его ячейку
+        if (dietInput) {
+          dietInput.disabled = false;
+          // Перекрашиваем: подсветка только для ячейки веса в рационе
+          dietInput.parentElement.classList.add('fixed-weight');
+          weightCell.classList.remove('fixed-weight');
+          // Установить значение по умолчанию равное максимальному весу, если пусто
+          const maxVal = weightCell.textContent;
+          if (!dietInput.value || parseFloat(dietInput.value) === 0) {
+            dietInput.value = maxVal;
+          }
+        }
+      } else {
+        // Отключить ввод и убрать подсветку
+        if (dietInput) {
+          dietInput.disabled = true;
+          dietInput.parentElement.classList.remove('fixed-weight');
+          weightCell.classList.remove('fixed-weight');
+          // Сбросить значение на максимальный вес
+          dietInput.value = weightCell.textContent;
+        }
+      }
+      // При смене статуса фиксации обновляем ограничение на вес и шаг
+      updateWeight();
+      // Пересчитать оптимальный рацион при изменении фиксации
+      if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+    });
+
+    // Обработка изменений введённого веса в рационе (доступно только при фиксации)
+    if (dietInput) {
+      /*
+        Пользователь может свободно вводить значение в поле "Вес в рационе",
+        поэтому в процессе ввода мы не пересчитываем рацион и не исправляем
+        число.  После завершения ввода (при потере фокуса или по событию
+        change, которое также срабатывает при изменении с помощью стрелочек),
+        значение округляется вниз к ближайшему кратному шага и затем
+        запускается пересчёт оптимального рациона.  Это позволяет вводить
+        произвольные числа, а также корректно использовать стрелочки для
+        увеличения/уменьшения веса.
+      */
+      // Функция округления веса к ближайшему меньшему кратному шага и запуска пересчёта
+      const adjustToStep = () => {
+        const maxVal = parseFloat(weightCell.textContent) || 0;
+        let val = parseFloat(dietInput.value);
+        if (isNaN(val) || val < 0) {
+          val = 0;
+        }
+        // Получаем размер шага из поля шага или исходного значения продукта
+        const stepValParsed = parseFloat(stepInput.value);
+        const stepVal = (!isNaN(stepValParsed) && stepValParsed > 0) ? stepValParsed : (p.step || 0);
+        // Округление к ближайшему кратному шага (если шаг > 0)
+        if (stepVal > 0) {
+          let rounded = Math.round(val / stepVal) * stepVal;
+          // Корректируем в пределах [0, maxVal]
+          if (rounded > maxVal) {
+            rounded = Math.floor(maxVal / stepVal) * stepVal;
+          }
+          if (rounded < 0) {
+            rounded = 0;
+          }
+          val = rounded;
+        } else {
+          // если шаг нулевой, просто ограничиваем максимумом
+          if (val > maxVal) {
+            val = maxVal;
+          }
+        }
+        dietInput.value = val.toFixed(2);
+        // После округления пересчитываем рацион
+        if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+      };
+      // Событие blur — пользователь закончил вводить число
+      dietInput.addEventListener('blur', adjustToStep);
+      // Событие change — значение изменилось (в том числе через стрелочки)
+      dietInput.addEventListener('change', adjustToStep);
+      // На событие input пересчёт не выполняем, чтобы не мешать вводу
+    }
+  });
+
+  const collapseCb = document.getElementById('collapseColumns');
+  collapseCb.addEventListener('change', () => {
+    document.getElementById('productTable').classList.toggle('collapsed', collapseCb.checked);
+  });
+  const minTailInput = document.getElementById('minTailPercent');
+  minTailInput.addEventListener('change', () => {
+    minTailInput.dataset.userSet = 'true';
+    if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+  });
+  const runCountInput = document.getElementById('runCount');
+  runCountInput.addEventListener('change', () => {
+    if (typeof computeOptimalDiet === 'function') computeOptimalDiet();
+  });
+
+  // Инициализация радарной диаграммы удалена, так как график больше не используется
+</script>
+<!-- Slider logic from the standalone telegram_web_app_slider_20_30.html
+     embedded here.  This script calculates the basal metabolic rate
+     (ОСО) and macro targets based on user inputs in the calculator
+     section.  After updating the summary table it synchronises the
+     global targets (via updateTargetsFromSummary) and triggers
+     recalc() so that the product suggestions are updated in real
+     time. -->
+<script>
+  (function(){
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+
+    // === Таблицы как в оригинальном файле "Готовый калькулятор" ===
+    // Пол -> добавка в формуле ОСО
+    const SEX_ADD = {
+      "Мужской": 1,
+      "Женский": -161
+    };
+    // Активность -> множитель
+    const ACTIVITY = [
+      ["Минимальный (сидячий образ жизни)", 1.2],
+      ["Низкий (легкие тренировки 1–3 раза в неделю)", 1.375],
+      ["Умеренный (тренировки 3–5 раз в неделю)", 1.55],
+      ["Высокий (интенсивные тренировки 6–7 раз в неделю)", 1.725],
+      ["Экстремальный (профессиональные атлеты, тяжелый физический труд)", 1.9],
+    ];
+
+    // === Элементы ===
+    const elSex = document.getElementById('sex');
+    const elAct = document.getElementById('activity');
+    const elW   = document.getElementById('weight');
+    const elH   = document.getElementById('height');
+    const elA   = document.getElementById('age');
+    const elOSO = document.getElementById('osso');
+    const elOSOExplain = document.getElementById('ossoExplain');
+
+    const elpProt = document.getElementById('pProtein');
+    const elpSat  = document.getElementById('pFatSat');
+    const elpUns  = document.getElementById('pFatUnsat');
+    const elpSim  = document.getElementById('pCarbSimple');
+
+    const elvProt = document.getElementById('vProtein');
+    const elvSat  = document.getElementById('vFatSat');
+    const elvUns  = document.getElementById('vFatUnsat');
+    const elvSim  = document.getElementById('vCarbSimple');
+
+    const elFibTotal = document.getElementById('fiberTotal');
+    const elFibRatio = document.getElementById('fiberRatio');
+    const elvFibRatio= document.getElementById('vFiberRatio');
+
+    const elSummary = document.getElementById('summary');
+    const elSend    = document.getElementById('send');
+
+    // Заполнение активности
+    function fillActivity(){
+      elAct.innerHTML = "";
+      for(const [label] of ACTIVITY){
+        const opt = document.createElement('option');
+        opt.value = label;
+        opt.textContent = label;
+        elAct.appendChild(opt);
+      }
+      // default selection
+      elAct.value = "Низкий (легкие тренировки 1–3 раза в неделю)";
+    }
+
+    // Применение темы Telegram
+    function applyTheme(){
+      if(!tg) return;
+      const tp = tg.themeParams || {};
+      const set = (v, fallback) => (v ? v : fallback);
+      document.documentElement.style.setProperty('--bg', set(tp.bg_color, '#ffffff'));
+      document.documentElement.style.setProperty('--text', set(tp.text_color, '#222222'));
+      document.documentElement.style.setProperty('--subtle', set(tp.hint_color, '#6b7280'));
+      document.documentElement.style.setProperty('--btn', set(tp.button_color, '#0ea5e9'));
+      document.documentElement.style.setProperty('--btn-text', set(tp.button_text_color, '#ffffff'));
+      document.documentElement.style.setProperty('--card', set(tp.secondary_bg_color, '#f3f4f6'));
+      document.documentElement.style.setProperty('--border', set(tp.section_separator_color, '#e5e7eb'));
+    }
+
+    // Градиент заполнения для ползунков
+    function setGradient(range){
+      const min = parseFloat(range.min);
+      const max = parseFloat(range.max);
+      const v   = parseFloat(range.value);
+      const pct = ((v - min) / (max - min)) * 100;
+      if(range.classList.contains('slider')){
+        range.style.backgroundSize = pct + '% 100%';
+      }
+    }
+
+    // Формула ОСО
+    function calcOSO(weightKg, heightCm, ageY, sex, activityLabel){
+      const sexAdd = SEX_ADD[sex] ?? 0;
+      const actRow = ACTIVITY.find(([lbl]) => lbl === activityLabel);
+      const kAct   = actRow ? actRow[1] : 1;
+      const base   = (10*weightKg) + (6.25*heightCm) - (5*ageY) + sexAdd;
+      return base * kAct;
+    }
+
+    function roundInt(x){ return Math.round(x); }
+    function clamp(x, lo, hi){ return Math.min(hi, Math.max(lo, x)); }
+    function num(el, fallback){
+      const v = parseFloat((el.value || '').toString().replace(',', '.'));
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    // Обновление процентов и клетчатки
+    function syncUIBits(){
+      elvProt.textContent = elpProt.value + '%';
+      elvSat.textContent  = elpSat.value + '%';
+      elvUns.textContent  = elpUns.value + '%';
+      elvSim.textContent  = elpSim.value + '%';
+      elvFibRatio.textContent = '1 : ' + parseFloat(elFibRatio.value).toFixed(1);
+      [elpProt, elpSat, elpUns, elpSim, elFibRatio].forEach(setGradient);
+    }
+
+    // Обновление глобальных целевых значений (заглушка для совместимости)
+    function updateTargetsFromSummary(){
+      // Функция оставлена для обратной совместимости с исходным кодом.
+      // Цели обновляются непосредственно в updateAll().
+    }
+
+    function updateAll(){
+      syncUIBits();
+      const sex = elSex.value;
+      const act = elAct.value;
+      const w = clamp(num(elW, 0), 0, 999);
+      const h = clamp(num(elH, 0), 0, 999);
+      const a = clamp(num(elA, 0), 0, 150);
+      // ОСО
+      const oso = calcOSO(w, h, a, sex, act);
+      currentOSO = oso;
+      elOSO.textContent = (Math.round(oso*10)/10).toFixed(1) + ' ккал';
+      elOSOExplain.textContent = `((10×${w}) + (6.25×${h}) − (5×${a}) + ${SEX_ADD[sex]}) × ${ACTIVITY.find(([lbl])=>lbl===act)?.[1]}`;
+      // Целевой калораж
+      const K = oso;
+      // Чтение процентов (доли)
+      const pProt = parseInt(elpProt.value, 10) / 100;
+      const pSat  = parseInt(elpSat.value, 10)  / 100;
+      const pUns  = parseInt(elpUns.value, 10)  / 100;
+      const pSim  = parseInt(elpSim.value, 10)  / 100;
+      // Граммы по округлению
+      const gProt = roundInt((K * pProt) / 4);
+      const gSat  = roundInt((K * pSat ) / 9);
+      const gUns  = roundInt((K * pUns ) / 9);
+      const gSim  = roundInt((K * pSim ) / 4);
+      // Клетчатка
+      const fibTotal = clamp(Math.round(num(elFibTotal, 0)), 0, 999);
+      const r = parseFloat(elFibRatio.value);
+      const gFibSol = roundInt(fibTotal / (1 + r));
+      const gFibIns = roundInt(fibTotal - gFibSol);
+      // Потраченная энергия на компоненты
+      const kcalUsed = (gProt*4) + (gSat*9) + (gUns*9) + (gSim*4) + ((gFibSol + gFibIns) * 1.5);
+      // Остаток на сложные углеводы
+      let gComplex = roundInt((K - kcalUsed) / 4);
+      if(gComplex < 0) gComplex = 0;
+      // Итоговая энергия
+      const kcalFinal = (gProt*4) + (gSat*9) + (gUns*9) + (gSim*4) + (gComplex*4) + ((gFibSol + gFibIns) * 1.5);
+      const kcalFinal10 = Math.round(kcalFinal*10)/10;
+      // Обновляем глобальные цели для оптимизатора
+      targets.protein = gProt;
+      targets.saturatedFat = gSat;
+      targets.unsaturatedFat = gUns;
+      targets.simpleCarbs = gSim;
+      targets.complexCarbs = gComplex;
+      targets.solubleFiber = gFibSol;
+      targets.insolubleFiber = gFibIns;
+      targets.calories = kcalFinal10;
+      // Таблица
+      const rows = [
+        ['Белки', gProt + ' г'],
+        ['Жиры насыщенные', gSat + ' г'],
+        ['Жиры ненасыщенные', gUns + ' г'],
+        ['Углеводы простые', gSim + ' г'],
+        ['Углеводы сложные перевариваемые', gComplex + ' г'],
+        ['Клетчатка растворимая', gFibSol + ' г'],
+        ['Клетчатка нерастворимая', gFibIns + ' г'],
+        ['ККал', kcalFinal10.toFixed(1)]
+      ];
+      elSummary.innerHTML = rows.map(([k,v]) => `<tr><td>${k}</td><td class="right">${v}</td></tr>`).join('');
+      // Синхронизация глобальных целей и обновление рекомендаций
+      if (typeof updateTargetsFromSummary === 'function') {
+        updateTargetsFromSummary();
+      }
+      if (typeof recalc === 'function') {
+        recalc();
+      }
+      // После пересчёта рекомендаций пересчитываем также оптимальный рацион
+      if (typeof computeOptimalDiet === 'function') {
+        computeOptimalDiet();
+      }
+      if(tg){
+        tg.MainButton.setText('Отправить расчёты');
+      }
+    }
+
+    function send(){
+      // Собрать данные
+      const data = {
+        sex: elSex.value,
+        activity: elAct.value,
+        weight: parseFloat(elW.value),
+        height: parseFloat(elH.value),
+        age: parseInt(elA.value, 10),
+        oso_kcal: parseFloat((elOSO.textContent||'0').replace(/[^\d.]/g,'')),
+        summary: Array.from(document.querySelectorAll('#summary tr')).map(tr => {
+          const tds = tr.querySelectorAll('td');
+          return {name: tds[0].textContent, value: tds[1].textContent};
+        })
+      };
+      // Отправка в бота при наличии Telegram.WebApp
+      if(tg){
+        tg.sendData(JSON.stringify({type:'nutrition_calc', payload:data, ts:Date.now()}));
+        tg.close();
+      } else {
+        // В обычном браузере просто обновляем цели и пересчитываем
+        if (typeof updateTargetsFromSummary === 'function') {
+          updateTargetsFromSummary();
+        }
+        if (typeof recalc === 'function') {
+          recalc();
+        }
+        // Пересчитываем оптимальный рацион в обычном браузере
+        if (typeof computeOptimalDiet === 'function') {
+          computeOptimalDiet();
+        }
+      }
+    }
+
+    function init(){
+      applyTheme();
+      fillActivity();
+      // Слушатели
+      [elSex, elAct, elW, elH, elA,
+       elpProt, elpSat, elpUns, elpSim,
+       elFibTotal, elFibRatio].forEach(el => {
+        el.addEventListener('input', updateAll);
+        el.addEventListener('change', updateAll);
+      });
+      // Кнопка отправки
+      elSend.addEventListener('click', send);
+      // Инициализация
+      [elpProt, elpSat, elpUns, elpSim, elFibRatio].forEach(setGradient);
+      updateAll();
+      if(tg){
+        tg.ready();
+        tg.expand();
+        tg.onEvent('themeChanged', applyTheme);
+        tg.MainButton.show();
+        tg.MainButton.onClick(send);
+        tg.BackButton.show();
+        tg.BackButton.onClick(() => tg.close());
+      }
+    }
+    // Вызов инициализации при загрузке
+    if(document.readyState === 'complete' || document.readyState === 'interactive'){
+      // Если DOM уже готов, запускаем сразу
+      init();
+    } else {
+      document.addEventListener('DOMContentLoaded', init);
+    }
+  })();
+</script>
+<script>
+async function computeOptimalDiet() {
+  const nutrientMatrix = [];
+  const steps = [];
+  const maxPortions = [];
+  const fixed = {};
+  const selected = [];
+  products.forEach((p, idx) => {
+    nutrientMatrix.push([
+      p.protein,
+      p.saturatedFat,
+      p.unsaturatedFat,
+      p.simpleCarbs,
+      p.complexCarbs,
+      p.solubleFiber,
+      p.insolubleFiber,
+      p.calories,
+    ]);
+    steps.push(p.step);
+    maxPortions.push(p.maxPortions);
+    const dietInput = document.getElementById('diet_' + idx);
+    const selCb = document.getElementById('sel_' + idx);
+    const fixCb = document.getElementById('fix_' + idx);
+    if (selCb && selCb.checked) {
+      selected.push(idx);
+      if (fixCb && fixCb.checked && dietInput) {
+        fixed[idx] = parseFloat(dietInput.value) || 0;
+      }
+    }
+  });
+
+  const weightsArr = [
+    weights.protein,
+    weights.saturatedFat,
+    weights.unsaturatedFat,
+    weights.simpleCarbs,
+    weights.complexCarbs,
+    weights.solubleFiber,
+    weights.insolubleFiber,
+    weights.calories,
+  ];
+  const targetsArr = [
+    targets.protein,
+    targets.saturatedFat,
+    targets.unsaturatedFat,
+    targets.simpleCarbs,
+    targets.complexCarbs,
+    targets.solubleFiber,
+    targets.insolubleFiber,
+    targets.calories,
+  ];
+
+  const response = await fetch('/optimize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      nutrient_matrix: nutrientMatrix,
+      steps: steps,
+      max_portions: maxPortions,
+      weights: weightsArr,
+      targets: targetsArr,
+      fixed_indices: fixed,
+    }),
+  });
+
+  const data = await response.json();
+  const resDiv = document.getElementById('optimizationResult');
+  if (data.error) {
+    resDiv.textContent = 'Ошибка: ' + data.error;
+    return;
+  }
+  const items = Object.entries(data.varAdd || {}).map(([i, grams]) => {
+    const name = products[i] ? products[i].name : i;
+    return `${name}: ${parseFloat(grams).toFixed(2)} г`;
+  });
+  resDiv.innerHTML =
+    `<p><strong>Рекомендуемые продукты:</strong><br>${items.join('<br>') || '—'}</p>` +
+    `<p><strong>RMSE:</strong> ${data.rmse ? data.rmse.toFixed(4) : '—'}</p>`;
+}
+
+computeOptimalDiet();
+</script>
+</body>
+</html>
