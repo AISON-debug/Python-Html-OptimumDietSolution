@@ -1,12 +1,13 @@
 """Lightweight diet optimisation module.
 
-This module provides a small, dependency‑free solver for choosing food portions
-to meet nutrient targets.  It mirrors the optimisation core used in the HTML
-web application: an iterative non‑negative least squares routine that attempts
-to cover a fraction of the remaining nutrient residual on each iteration.  The
+This module provides a lightweight solver for choosing food portions to meet
+nutrient targets.  It mirrors the optimisation core used in the HTML web
+application: an iterative non‑negative least squares routine that attempts to
+cover a fraction of the remaining nutrient residual on each iteration.  The
 public :class:`DietOptimizer` exposes :meth:`compute_optimal_diet` which searches
 over residual fractions and random orderings of products to minimise the
-weighted RMSE between achieved and target nutrients.
+weighted RMSE between achieved and target nutrients.  Plotly is used for
+optional graph generation when running the demo.
 
 The code includes a small demo executed when run as a script.
 """
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 import math
 import random
+import plotly.graph_objects as go
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +286,7 @@ class DietOptimizer:
         best_sel: Dict[str, object] | None = None
         best_full: Dict[str, object] | None = None
         run_best: List[Dict[str, float] | None] = [None] * run_count
+        heat_data: List[Dict[str, float]] = []
 
         for perc in range(max(1, min_tail_percent), 101):
             alpha = perc / 100.0
@@ -293,6 +296,7 @@ class DietOptimizer:
                 res = self._evaluate_diet(
                     shuffled, resid[:], totals_fixed, fixed_indices, alpha
                 )
+                heat_data.append({"x": perc, "y": run + 1, "rmse": res["rmse"]})
                 if run_best[run] is None or res["rmse"] < run_best[run]["rmse"]:
                     run_best[run] = {"run": run + 1, "rf": perc, "rmse": res["rmse"]}
                 if best_sel is None or res["rmse"] < best_sel["rmse"]:
@@ -322,6 +326,9 @@ class DietOptimizer:
             "bestSelection": best_sel,
             "bestFull": best_full,
             "runBest": run_best,
+            "heatData": heat_data,
+            "minPercent": max(1, min_tail_percent),
+            "runCount": run_count,
             "overallBestRmse": best_sel["rmse"],
             "alphaStar": best_sel["rf"] / 100.0,
             "avgRf": avg_rf,
@@ -412,6 +419,202 @@ class DietOptimizer:
 
         return "\n".join(lines)
 
+    def plot_result_graphs(
+        self, result: Dict[str, object], prefix: str = "diet"
+    ) -> List[str]:
+        """Generate interactive plots mirroring the WebApp graphs.
+
+        The function creates three HTML files using Plotly:
+        ``{prefix}_rmse_surface.html`` for the RMSE surface across runs and
+        residual fractions, ``{prefix}_rf_runs.html`` showing the best residual
+        fraction per run, and ``{prefix}_rmse_best_surface.html`` visualising the
+        cumulative best RMSE.  File paths are returned for convenience.
+        """
+
+        heat_data = result.get("heatData", [])
+        if not heat_data:
+            return []
+
+        run_best = result["runBest"]
+        best_sel = result["bestSelection"]
+        best_full = result["bestFull"]
+        avg_rf = result.get("avgRf", 0)
+        overall_best = result.get("overallBest", run_best[0])
+        run_count = result.get("runCount", len(run_best))
+        min_percent = result.get("minPercent", 1)
+
+        percents = sorted({d["x"] for d in heat_data})
+        runs = list(range(1, run_count + 1))
+
+        rmse_by_perc = {p: [None] * run_count for p in percents}
+        for d in heat_data:
+            rmse_by_perc[d["x"]][d["y"] - 1] = d["rmse"]
+
+        values = [d["rmse"] for d in heat_data]
+        min_sel = min(values)
+        max_sel = max(values)
+        denom = max_sel - min_sel if max_sel > min_sel else 1.0
+        z_matrix = [
+            [
+                (rmse_by_perc[p][r - 1] - min_sel + 1)
+                if rmse_by_perc[p][r - 1] is not None
+                else None
+                for p in percents
+            ]
+            for r in runs
+        ]
+        color_matrix = [
+            [
+                math.sqrt((rmse_by_perc[p][r - 1] - min_sel) / denom)
+                if rmse_by_perc[p][r - 1] is not None
+                else None
+                for p in percents
+            ]
+            for r in runs
+        ]
+
+        best_matrix: List[List[float]] = []
+        for p in percents:
+            arr = rmse_by_perc[p]
+            best = float("inf")
+            row = []
+            for val in arr:
+                if val is not None and val < best:
+                    best = val
+                row.append(best)
+            best_matrix.append(row)
+
+        flat_best = [v for row in best_matrix for v in row if math.isfinite(v)]
+        min_best = min(flat_best)
+        max_best = max(flat_best)
+        k_diff = max_best / min_best if min_best > 0 else 1
+        base = 2 ** k_diff
+        thresholds = [
+            (min_best, "#f0fff0"),
+            (min_best * base ** (1 / 5), "#00ff00"),
+            (min_best * base ** (1 / 4), "#ffff00"),
+            (min_best * base ** (1 / 3), "#ffa500"),
+            (min_best * base ** (1 / 2), "#ff0000"),
+            (min_best * base, "#8b0000"),
+        ]
+        max_scale = min_best * base
+        colorscale_best = [
+            ((v - min_best) / (max_scale - min_best), color)
+            for v, color in thresholds
+        ]
+
+        paths = []
+        fig1 = go.Figure(
+            data=[
+                go.Surface(
+                    x=percents,
+                    y=runs,
+                    z=z_matrix,
+                    surfacecolor=color_matrix,
+                    colorscale=[[0, "green"], [0.5, "yellow"], [1, "red"]],
+                    cmin=0,
+                    cmax=1,
+                    showscale=False,
+                    contours={"x": {"show": True}, "y": {"show": True}},
+                )
+            ],
+            layout=go.Layout(
+                scene=dict(
+                    xaxis=dict(title="Доля остатка (%)", range=[min_percent, 100]),
+                    yaxis=dict(title="Прогон", range=[1, run_count]),
+                    zaxis=dict(title="RMSE", type="log"),
+                ),
+                annotations=[
+                    dict(
+                        text=f"min RMSE пула: {best_sel['rmse']:.3f}",
+                        x=1,
+                        y=1,
+                        xref="paper",
+                        yref="paper",
+                        showarrow=False,
+                        xanchor="right",
+                        yanchor="top",
+                    ),
+                    dict(
+                        text=f"min RMSE базы: {best_full['rmseFull']:.3f}",
+                        x=1,
+                        y=0.95,
+                        xref="paper",
+                        yref="paper",
+                        showarrow=False,
+                        xanchor="right",
+                        yanchor="top",
+                    ),
+                ],
+            ),
+        )
+        path1 = f"{prefix}_rmse_surface.html"
+        fig1.write_html(path1, include_plotlyjs="cdn", auto_open=False)
+        paths.append(path1)
+
+        x_runs = [r["run"] for r in run_best]
+        y_rf = [r["rf"] for r in run_best]
+        colors = ["red" if r["run"] == overall_best["run"] else "black" for r in run_best]
+        sizes = [10 if r["run"] == overall_best["run"] else 6 for r in run_best]
+        fig2 = go.Figure(
+            data=[
+                go.Scatter(
+                    x=x_runs,
+                    y=y_rf,
+                    mode="lines+markers",
+                    marker=dict(color=colors, size=sizes),
+                    line=dict(color="black"),
+                )
+            ],
+            layout=go.Layout(
+                xaxis=dict(title="Прогон", dtick=1),
+                yaxis=dict(title="Доля остатка (%)", range=[min_percent, 100]),
+                annotations=[
+                    dict(
+                        text=f"наименьший rmse {overall_best['rmse']:.3f}; средняя доля {avg_rf:.2f}%",
+                        x=0,
+                        y=1,
+                        xref="paper",
+                        yref="paper",
+                        showarrow=False,
+                        xanchor="left",
+                        yanchor="top",
+                    )
+                ],
+            ),
+        )
+        path2 = f"{prefix}_rf_runs.html"
+        fig2.write_html(path2, include_plotlyjs="cdn", auto_open=False)
+        paths.append(path2)
+
+        fig3 = go.Figure(
+            data=[
+                go.Surface(
+                    x=runs,
+                    y=percents,
+                    z=best_matrix,
+                    colorscale=colorscale_best,
+                    cmin=min_best,
+                    cmax=max_scale,
+                    showscale=False,
+                    contours={"x": {"show": True}, "y": {"show": True}},
+                )
+            ],
+            layout=go.Layout(
+                scene=dict(
+                    xaxis=dict(title="Прогон", range=[1, run_count]),
+                    yaxis=dict(title="Доля остатка (%)", range=[min_percent, 100]),
+                    zaxis=dict(title="Лучший RMSE", type="log"),
+                ),
+                annotations=[],
+            ),
+        )
+        path3 = f"{prefix}_rmse_best_surface.html"
+        fig3.write_html(path3, include_plotlyjs="cdn", auto_open=False)
+        paths.append(path3)
+
+        return paths
+
 
 # ---------------------------------------------------------------------------
 # Demo usage
@@ -445,3 +648,8 @@ if __name__ == "__main__":
     fixed = {0: 20.0}
     result = optimizer.compute_optimal_diet(fixed_indices=fixed)
     print(optimizer.format_result_tables(result, fixed_indices=fixed))
+    paths = optimizer.plot_result_graphs(result, prefix="demo")
+    if paths:
+        print("Generated plots:")
+        for p in paths:
+            print("  ", p)
